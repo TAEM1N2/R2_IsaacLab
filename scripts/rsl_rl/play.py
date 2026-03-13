@@ -3,13 +3,35 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
-import sys 
+import importlib
 import os
+import sys
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-sys.path.insert(0, os.path.join(REPO_ROOT, "rsl_rl"))
-sys.path.insert(0, os.path.join(REPO_ROOT, "exts", "bipedal_locomotion"))
-sys.path.insert(0, os.path.join(REPO_ROOT, "exts", "pongbot_r2"))
+EXTS_ROOT = os.path.join(REPO_ROOT, "exts")
+
+
+def _register_local_extensions() -> None:
+    """Expose local repo extensions and import them so gym tasks are registered."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "rsl_rl"))
+
+    if not os.path.isdir(EXTS_ROOT):
+        return
+
+    for entry in sorted(os.scandir(EXTS_ROOT), key=lambda item: item.name):
+        if not entry.is_dir():
+            continue
+        package_root = entry.path
+        package_name = entry.name
+        package_init = os.path.join(package_root, package_name, "__init__.py")
+        if not os.path.isfile(package_init):
+            continue
+
+        sys.path.insert(0, package_root)
+        importlib.import_module(package_name)
+
+
+_register_local_extensions()
 
 from isaaclab.app import AppLauncher
 
@@ -54,9 +76,6 @@ from isaaclab.envs import ManagerBasedRLEnvCfg,DirectMARLEnv, multi_agent_to_sin
 from isaaclab.utils.dict import print_dict
 from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
-# Import extensions to set up environment tasks
-import bipedal_locomotion  # noqa: F401
-import pongbot_r2  # noqa: F401
 from bipedal_locomotion.utils.wrappers.rsl_rl import RslRlPpoAlgorithmMlpCfg, export_mlp_as_onnx, export_policy_as_jit
 
 

@@ -1,14 +1,9 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
-
 import omni.ext
 
 
 # Functions and vars are available to other extension as usual in python: `example.python_ext.some_public_function(x)`
 def some_public_function(x: int):
-    print("[pongbot_r2] some_public_function was called with x: ", x)
+    print("[bipedal_locomotion] some_public_function was called with x: ", x)
     return x**x
 
 
@@ -19,7 +14,7 @@ class ExampleExtension(omni.ext.IExt):
     # ext_id is current extension id. It can be used with extension manager to query additional information, like where
     # this extension is located on filesystem.
     def on_startup(self, ext_id):
-        print("[pongbot_r2] startup")
+        print("[bipedal_locomotion] startup")
 
         self._count = 0
 
@@ -43,4 +38,4 @@ class ExampleExtension(omni.ext.IExt):
                     omni.ui.Button("Reset", clicked_fn=on_reset)
 
     def on_shutdown(self):
-        print("[pongbot_r2] shutdown")
+        print("[bipedal_locomotion] shutdown")

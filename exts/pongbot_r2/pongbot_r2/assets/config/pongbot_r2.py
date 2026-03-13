@@ -10,7 +10,7 @@ from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.actuators import DelayedPDActuatorCfg
 
 
-USD_PATH = Path(__file__).resolve().parents[3] / "models" / "R2_usd.usd"
+USD_PATH = Path(__file__).resolve().parents[1] / "usd" / "pongbot_r2" / "R2_usd.usd"
 
 
 RMD_TOR_CTRL = DelayedPDActuatorCfg(
@@ -30,7 +30,7 @@ RMD_TOR_CTRL = DelayedPDActuatorCfg(
 )
 
 # Configuration - Articulation.
-PONRBOT_R2_CFG = ArticulationCfg(
+PONGBOT_R2_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=str(USD_PATH),
         activate_contact_sensors=True,
@@ -59,3 +59,6 @@ PONRBOT_R2_CFG = ArticulationCfg(
     actuators={"legs": RMD_TOR_CTRL}, # REALNET_PD_CTRL
     soft_joint_pos_limit_factor=0.95,
 )
+
+# Backward-compatible alias for older imports that used the misspelled name.
+PONRBOT_R2_CFG = PONGBOT_R2_CFG

@@ -16,8 +16,7 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.sensors import CameraCfg
 from isaaclab.utils import configclass
 
-from pongbot_r2.assets.robots.pongbot_r2 import PONRBOT_R2_CFG
-
+from pongbot_r2.assets.config.pongbot_r2 import PONGBOT_R2_CFG
 
 @configclass
 class RowProgressionCfg:
@@ -77,8 +76,6 @@ class EventCfg:
             "distribution": "uniform",
         },
     )
-
-
 
 @configclass
 class PongbotR2EnvCfg(DirectRLEnvCfg):
@@ -152,7 +149,7 @@ class PongbotR2EnvCfg(DirectRLEnvCfg):
     events: EventCfg = EventCfg()
 
     # robot
-    robot: ArticulationCfg = PONRBOT_R2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot: ArticulationCfg = PONGBOT_R2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*", history_length=2, update_period=0.01, track_air_time=True
     )
