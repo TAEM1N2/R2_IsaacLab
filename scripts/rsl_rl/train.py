@@ -1,9 +1,16 @@
 """Script to train RL agent with RSL-RL."""
 
 """Launch Isaac Sim Simulator first."""
+import sys
+import os
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+sys.path.insert(0, os.path.join(REPO_ROOT, "rsl_rl"))
+sys.path.insert(0, os.path.join(REPO_ROOT, "exts", "bipedal_locomotion"))
+sys.path.insert(0, os.path.join(REPO_ROOT, "exts", "pongbot_r2"))
+
 
 import argparse
-import sys
 
 from isaaclab.app import AppLauncher
 
@@ -13,8 +20,8 @@ import cli_args  # isort: skip
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
-parser.add_argument("--video_length", type=int, default=400, help="Length of the recorded video (in steps).")
-parser.add_argument("--video_interval", type=int, default=24000, help="Interval between video recordings (in steps).")
+parser.add_argument("--video_length", type=int, default=250, help="Length of the recorded video (in steps).")
+parser.add_argument("--video_interval", type=int, default=10000, help="Interval between video recordings (in steps).")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--max_iterations", type=int, default=None, help="Maximum number of iterations to train.")
 parser.add_argument("--save_interval", type=int, default=None, help="The number of iterations between saves")
@@ -62,6 +69,8 @@ from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 
 # Import extensions to set up environment tasks
+import bipedal_locomotion  # noqa: F401
+import pongbot_r2  # noqa: F401
 from bipedal_locomotion.utils.wrappers.rsl_rl import RslRlPpoAlgorithmMlpCfg
 
 

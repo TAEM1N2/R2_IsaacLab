@@ -2,20 +2,15 @@ from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
 from bipedal_locomotion.utils.wrappers.rsl_rl.rl_mlp_cfg import EncoderCfg, RslRlPpoAlgorithmMlpCfg
 
-import os
-robot_type = os.getenv("ROBOT_TYPE")
 
 # Isaac Lab original RSL-RL configuration
 @configclass
 class PFPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
-    max_iterations = 15000
+    max_iterations = 2000
     save_interval = 500
     experiment_name = "pf_flat"
     empirical_normalization = False
-    # encoder_class_name = "MLP_Encoder"
-    # policy_class_name = "ActorCritic"
-    # algorithm_class_name = "PPO"
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
         actor_hidden_dims=[512, 256, 128],
@@ -34,10 +29,10 @@ class PFPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         gamma=0.99,
         lam=0.95,
         desired_kl=0.01,
-        max_grad_norm=1.0, 
+        max_grad_norm=1.0,
     )
-    
-#-----------------------------------------------------------------
+
+
 @configclass
 class PF_TRON1AFlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
@@ -68,20 +63,20 @@ class PF_TRON1AFlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         obs_history_len=10,
     )
     encoder = EncoderCfg(
-        output_detach = True,
-        num_output_dim = 3,
-        hidden_dims = [256, 128],
-        activation = "elu",
-        orthogonal_init = False,
+        output_detach=True,
+        num_output_dim=3,
+        hidden_dims=[256, 128],
+        activation="elu",
+        orthogonal_init=False,
     )
 
-#-----------------------------------------------------------------
+
 @configclass
-class SF_TRON1AFlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+class PF_TRON1ARoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
-    max_iterations = 15000
+    max_iterations = 2000
     save_interval = 500
-    experiment_name = "sf_tron_1a_flat"
+    experiment_name = "pf_tron_1a_rough"
     empirical_normalization = False
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
@@ -106,21 +101,19 @@ class SF_TRON1AFlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         obs_history_len=10,
     )
     encoder = EncoderCfg(
-        output_detach = True,
-        num_output_dim = 3,
-        hidden_dims = [256, 128],
-        activation = "elu",
-        orthogonal_init = False,
+        output_detach=True,
+        num_output_dim=3,
+        hidden_dims=[256, 128],
+        activation="elu",
+        orthogonal_init=False,
     )
 
-
-#-----------------------------------------------------------------
 @configclass
-class WF_TRON1AFlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+class PF_TRON1AStairPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
-    max_iterations = 10000
+    max_iterations =2000
     save_interval = 500
-    experiment_name = "wf_tron_1a_flat"
+    experiment_name = "pf_tron_1a_stair"
     empirical_normalization = False
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
@@ -145,9 +138,9 @@ class WF_TRON1AFlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         obs_history_len=10,
     )
     encoder = EncoderCfg(
-        output_detach = True,
-        num_output_dim = 3,
-        hidden_dims = [256, 128],
-        activation = "elu",
-        orthogonal_init = False,
+        output_detach=True,
+        num_output_dim=3,
+        hidden_dims=[256, 128],
+        activation="elu",
+        orthogonal_init=False,
     )

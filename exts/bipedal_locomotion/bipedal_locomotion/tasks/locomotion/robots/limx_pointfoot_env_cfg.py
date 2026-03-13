@@ -143,7 +143,7 @@ class PFBlindStairEnvCfg(PFBaseEnvCfg):
         self.commands.base_velocity.ranges.lin_vel_y = (-0.0, 0.0)
         self.commands.base_velocity.ranges.ang_vel_z = (-math.pi / 6, math.pi / 6)
 
-        self.rewards.rew_lin_vel_xy.weight = 2.0
+        self.rewards.rew_lin_vel_xy.weight = 2.5
         self.rewards.rew_ang_vel_z.weight = 1.5
         self.rewards.pen_lin_vel_z.weight = -1.0
         self.rewards.pen_ang_vel_xy.weight = -0.05
@@ -203,6 +203,7 @@ class PFStairEnvCfgv1(PFBaseEnvCfg):
         )
         
         self.scene.height_scanner.update_period = self.decimation * self.sim.dt
+        self.rewards.pen_base_height.params["sensor_cfg"] = SceneEntityCfg("height_scanner")
 
         self.scene.terrain.terrain_type = "generator"
         self.scene.terrain.terrain_generator = STAIRS_TERRAINS_CFG
@@ -230,6 +231,7 @@ class PFStairEnvCfgv1_PLAY(PFBaseEnvCfg_PLAY):
         )
         
         self.scene.height_scanner.update_period = self.decimation * self.sim.dt
+        self.rewards.pen_base_height.params["sensor_cfg"] = SceneEntityCfg("height_scanner")
 
         # spawn the robot randomly in the grid (instead of their terrain levels)
         self.scene.terrain.terrain_type = "generator"

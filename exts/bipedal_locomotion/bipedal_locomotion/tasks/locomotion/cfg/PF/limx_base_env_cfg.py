@@ -354,7 +354,7 @@ class RewardsCfg:
     # termination related rewards
     keep_balance = RewTerm(
         func=mdp.stay_alive,
-        weight=1.0
+        weight=2.0
     )
 
     # tracking related rewards
@@ -388,7 +388,7 @@ class RewardsCfg:
         },
     )
     pen_action_smoothness = RewTerm(func=mdp.ActionSmoothnessPenalty, weight=-0.04)
-    pen_flat_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-10.0)
+    pen_flat_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-2.5) #-10.0)
     pen_feet_distance = RewTerm(
         func=mdp.feet_distance,
         weight=-100,

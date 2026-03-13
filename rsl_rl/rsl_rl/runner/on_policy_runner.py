@@ -55,12 +55,15 @@ class OnPolicyRunner:
         obs, extras = self.env.get_observations()   
         self.num_obs = obs.shape[1]
         self.obs_history_len = self.alg_cfg.pop("obs_history_len")
+        obs_history = extras["observations"].get("obsHistory")
+        assert obs_history is not None, "obsHistory not found in observations"
+        self.obs_history_dim = obs_history.reshape(obs_history.shape[0], -1).shape[1]
         assert "commands" in extras["observations"], f"Commands not found in observations"
         self.num_commands = extras["observations"]["commands"].shape[1]
         assert "critic" in extras["observations"], f"Critic observations not found in observations"
         num_critic_obs = extras["observations"]["critic"].shape[1] + self.num_commands
         privileged_input_size = num_critic_obs
-        self.ecd_cfg["num_input_dim"] = self.obs_history_len * self.num_obs
+        self.ecd_cfg["num_input_dim"] = self.obs_history_dim
 
         encoder = eval("MLP_Encoder")(
             **self.ecd_cfg,
@@ -94,7 +97,7 @@ class OnPolicyRunner:
             self.num_steps_per_env,
             [self.num_obs],
             [num_critic_obs],
-            [self.obs_history_len * self.num_obs],
+            [self.obs_history_dim],
             [self.num_commands],
             [self.env.num_actions],
         )
