@@ -37,9 +37,25 @@ def foot_landing_vel(
     z_vels = asset.data.body_lin_vel_w[:, asset_cfg.body_ids, 2]
     contacts = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, 2] > 0.1
 
-    foot_heights = torch.clip(
-    asset.data.body_pos_w[:, asset_cfg.body_ids, 2] - foot_radius, 0, 1
-    )  # TODO: change to the height relative to the vertical projection of the terrain
+    foot_positions = asset.data.body_pos_w[:, asset_cfg.body_ids, :]
+    terrain_z = 0.0
+    if "height_scanner" in env.scene.sensors:
+        height_scanner: RayCaster = env.scene.sensors["height_scanner"]
+        ray_hits_w = height_scanner.data.ray_hits_w
+        valid_hits = torch.isfinite(ray_hits_w[..., 2])
+        if torch.any(valid_hits):
+            foot_xy = foot_positions[..., :2]
+            ray_xy = ray_hits_w[..., :2]
+            dist_sq = torch.sum(
+                torch.square(foot_xy.unsqueeze(2) - ray_xy.unsqueeze(1)),
+                dim=-1,
+            )
+            dist_sq = torch.where(valid_hits.unsqueeze(1), dist_sq, torch.inf)
+            nearest_hit_idx = torch.argmin(dist_sq, dim=2, keepdim=True)
+            terrain_z = torch.gather(ray_hits_w[..., 2], 1, nearest_hit_idx.squeeze(-1))
+            terrain_z = torch.where(torch.isfinite(terrain_z), terrain_z, torch.zeros_like(terrain_z))
+
+    foot_heights = torch.clip(foot_positions[..., 2] - terrain_z - foot_radius, 0, 1)
 
     about_to_land = (foot_heights < about_landing_threshold) & (~contacts) & (z_vels < 0.0)
     landing_z_vels = torch.where(about_to_land, z_vels, torch.zeros_like(z_vels))
@@ -53,6 +69,30 @@ def joint_powers_l1(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEnt
     asset: Articulation = env.scene[asset_cfg.name]
     return torch.sum(torch.abs(torch.mul(asset.data.applied_torque, asset.data.joint_vel)), dim=1)
 
+
+def joint_powers_var(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    joint_group_names: tuple[str, ...] = (".*HR_JOINT", ".*HP_JOINT", ".*KN_JOINT"),
+) -> torch.Tensor:
+    """Penalize imbalance in power usage within each joint type.
+
+    The variance is computed separately for each joint group, e.g. left/right HR,
+    left/right HP, left/right KN, and then summed. This avoids comparing inherently
+    different joint types against each other.
+    """
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    joint_power = torch.abs(asset.data.applied_torque * asset.data.joint_vel)
+
+    penalty = torch.zeros(env.num_envs, device=env.device)
+    for joint_name in joint_group_names:
+        joint_ids = asset.find_joints(joint_name)[0]
+        if len(joint_ids) == 0:
+            continue
+        penalty += torch.var(joint_power[:, joint_ids], dim=1, unbiased=False)
+
+    return penalty
 
 def no_fly(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, threshold: float = 1.0) -> torch.Tensor:
     """Reward if only one foot is in contact with the ground."""
@@ -110,7 +150,7 @@ def unbalance_feet_height(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) ->
 
 def feet_distance(env: ManagerBasedRLEnv,
                   asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-                  feet_links_name: list[str]=["foot_[RL]_Link"],
+                  feet_links_name: list[str]=[".*TIP"],
                   min_feet_distance: float = 0.1,
                   max_feet_distance: float = 1.0,)-> torch.Tensor:
     # Penalize base height away from target
@@ -287,9 +327,23 @@ def feet_regulation(env: ManagerBasedRLEnv,
     base_height_target: float,
 ) -> torch.Tensor:
     asset: RigidObject = env.scene[asset_cfg.name]
-    feet_height = torch.clip(
-        asset.data.body_pos_w[:, asset_cfg.body_ids, 2] - foot_radius, 0, 1
-    )  # TODO: change to the height relative to the vertical projection of the terrain
+    feet_positions = asset.data.body_pos_w[:, asset_cfg.body_ids, :]
+    terrain_z = 0.0
+    if "height_scanner" in env.scene.sensors:
+        height_scanner: RayCaster = env.scene.sensors["height_scanner"]
+        ray_hits_w = height_scanner.data.ray_hits_w
+        valid_hits = torch.isfinite(ray_hits_w[..., 2])
+        if torch.any(valid_hits):
+            dist_sq = torch.sum(
+                torch.square(feet_positions[..., :2].unsqueeze(2) - ray_hits_w[..., :2].unsqueeze(1)),
+                dim=-1,
+            )
+            dist_sq = torch.where(valid_hits.unsqueeze(1), dist_sq, torch.inf)
+            nearest_hit_idx = torch.argmin(dist_sq, dim=2)
+            terrain_z = torch.gather(ray_hits_w[..., 2], 1, nearest_hit_idx)
+            terrain_z = torch.where(torch.isfinite(terrain_z), terrain_z, torch.zeros_like(terrain_z))
+
+    feet_height = torch.clip(feet_positions[..., 2] - terrain_z - foot_radius, 0, 1)
     feet_vel_xy = asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2]
 
     height_scale = torch.exp(-feet_height / base_height_target)
@@ -398,10 +452,12 @@ class GaitReward(ManagerTermBase):
 
         # Force-based reward
         foot_forces = torch.norm(self.contact_sensor.data.net_forces_w[:, self.sensor_cfg.body_ids], dim=-1)
+        desired_contact_states = self._match_contact_shape(desired_contact_states, foot_forces.shape[1])
         force_reward = self._compute_force_reward(foot_forces, desired_contact_states)
 
         # Velocity-based reward
         foot_velocities = torch.norm(self.asset.data.body_lin_vel_w[:, self.asset_cfg.body_ids], dim=-1)
+        desired_contact_states = self._match_contact_shape(desired_contact_states, foot_velocities.shape[1])
         velocity_reward = self._compute_velocity_reward(foot_velocities, desired_contact_states)
 
         # Combine rewards
@@ -452,6 +508,33 @@ class GaitReward(ManagerTermBase):
         ) + smoothing_cdf_start(foot_indices - 1) * (1 - smoothing_cdf_start(foot_indices - 1.5))
 
         return desired_contact_states
+
+    def _match_contact_shape(self, desired_contacts: torch.Tensor, target_dim: int) -> torch.Tensor:
+        """Expand or trim desired contact states to match the number of tracked feet.
+
+        The gait command encodes two phases. For quadrupeds we map them to diagonal pairs:
+        [phase_a, phase_b] -> [phase_a, phase_b, phase_b, phase_a].
+        """
+        if desired_contacts.shape[1] == target_dim:
+            return desired_contacts
+
+        if desired_contacts.shape[1] == 2 and target_dim == 4:
+            return torch.stack(
+                [
+                    desired_contacts[:, 0],
+                    desired_contacts[:, 1],
+                    desired_contacts[:, 1],
+                    desired_contacts[:, 0],
+                ],
+                dim=1,
+            )
+
+        if desired_contacts.shape[1] > target_dim:
+            return desired_contacts[:, :target_dim]
+
+        repeat_factor = (target_dim + desired_contacts.shape[1] - 1) // desired_contacts.shape[1]
+        expanded = desired_contacts.repeat(1, repeat_factor)
+        return expanded[:, :target_dim]
 
     def _compute_force_reward(self, forces: torch.Tensor, desired_contacts: torch.Tensor) -> torch.Tensor:
         """Compute force-based reward component."""

@@ -21,8 +21,8 @@ RMD_TOR_CTRL = DelayedPDActuatorCfg(
         ".*KN_JOINT": 150.0,
     },
     velocity_limit=19.,
-    stiffness={".*": 100.0},
-    damping={".*": 1.},
+    stiffness={".*": 150.0},
+    damping={".*": 2.5},
     armature = {".*": 0.0},
     friction = {".*": 0.0},
     min_delay=0,  # physics time steps (min: 2.0*0=0.0ms)

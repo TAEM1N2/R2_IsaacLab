@@ -33,7 +33,27 @@ def _register_local_extensions() -> None:
         importlib.import_module(package_name)
 
 
-_register_local_extensions()
+def _remove_default_ground_planes() -> None:
+    """Remove global ground-plane prims that may remain in the stage."""
+    from isaacsim.core.utils.prims import delete_prim, is_prim_path_valid
+
+    for prim_path in ("/World/defaultGroundPlane", "/World/ground_plane"):
+        if is_prim_path_valid(prim_path):
+            delete_prim(prim_path)
+
+
+def _remove_robot_embedded_ground_planes() -> None:
+    """Remove GroundPlane prims embedded under cloned robot assets."""
+    from isaacsim.core.utils.prims import delete_prim, find_matching_prim_paths
+
+    removed = 0
+    for pattern in ("/World/envs/env_.*/Robot/GroundPlane", "/World/envs/env_.*/robot/GroundPlane"):
+        for prim_path in find_matching_prim_paths(pattern):
+            delete_prim(prim_path)
+            removed += 1
+    if removed:
+        print(f"[INFO] Removed {removed} embedded robot GroundPlane prim(s).")
+
 
 from isaaclab.app import AppLauncher
 
@@ -44,7 +64,7 @@ import cli_args  # isort: skip
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=250, help="Length of the recorded video (in steps).")
-parser.add_argument("--video_interval", type=int, default=10000, help="Interval between video recordings (in steps).")
+parser.add_argument("--video_interval", type=int, default=3000, help="Interval between video recordings (in steps).")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--max_iterations", type=int, default=None, help="Maximum number of iterations to train.")
 parser.add_argument("--save_interval", type=int, default=None, help="The number of iterations between saves")
@@ -68,6 +88,11 @@ sys.argv = [sys.argv[0]] + hydra_args
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
+_remove_default_ground_planes()
+
+# Local extensions may import Isaac Sim / Omniverse modules, so register them
+# only after the simulator app has been launched.
+_register_local_extensions()
 
 """Rest everything follows."""
 
@@ -91,7 +116,7 @@ from isaaclab.utils.io import dump_pickle, dump_yaml
 from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 
-from bipedal_locomotion.utils.wrappers.rsl_rl import RslRlPpoAlgorithmMlpCfg
+from pongbot_r2.utils.wrappers.rsl_rl import RslRlPpoAlgorithmMlpCfg
 
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -125,6 +150,7 @@ def main():
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    _remove_robot_embedded_ground_planes()
     # wrap for video recording
     if args_cli.video:
         video_kwargs = {

@@ -118,6 +118,59 @@ class OnPolicyRunner:
 
         # _, _ = self.env.reset()
         _ = self.env.reset()
+        self._print_actuator_gains_once()
+
+    def _print_actuator_gains_once(self) -> None:
+        """Print actuator kp/kd gains for env 0 once at startup."""
+        base_env = getattr(self.env, "unwrapped", None)
+        if base_env is None:
+            return
+
+        try:
+            asset = base_env.scene["robot"]
+        except KeyError:
+            return
+
+        if not hasattr(asset, "actuators"):
+            return
+
+        for actuator_name, actuator in asset.actuators.items():
+            kp = [round(float(v), 2) for v in actuator.stiffness[0].detach().cpu().tolist()]
+            kd = [round(float(v), 2) for v in actuator.damping[0].detach().cpu().tolist()]
+            print(f"[ACTUATOR_DEBUG] {actuator_name} kp {kp}", flush=True)
+            print(f"[ACTUATOR_DEBUG] {actuator_name} kd {kd}", flush=True)
+
+    def _print_action_debug(self, step_idx: int) -> None:
+        """Print action processing and actuator outputs for env 0."""
+        def _round_tensor(values: torch.Tensor) -> list[float]:
+            return [round(float(v), 2) for v in values.detach().cpu().tolist()]
+
+        base_env = getattr(self.env, "unwrapped", None)
+        if base_env is None or not hasattr(base_env, "action_manager"):
+            return
+        if not getattr(base_env.cfg, "debug_action_print", False):
+            return
+
+        try:
+            asset = base_env.scene["robot"]
+            action_term = base_env.action_manager.get_term("joint_pos")
+        except KeyError:
+            return
+
+        env_idx = 0
+        joint_ids = action_term._joint_ids
+        print(
+            "[ACTION_DEBUG]",
+            f"step={step_idx}",
+            f"raw={_round_tensor(action_term.raw_actions[env_idx])}",
+            f"processed={_round_tensor(action_term.processed_actions[env_idx])}",
+            f"default_joint_pos={_round_tensor(asset.data.default_joint_pos[env_idx, joint_ids])}",
+            f"joint_pos_target={_round_tensor(asset.data.joint_pos_target[env_idx, joint_ids])}",
+            f"current_joint_pos={_round_tensor(asset.data.joint_pos[env_idx, joint_ids])}",
+            f"computed_torque={_round_tensor(asset.data.computed_torque[env_idx, joint_ids])}",
+            f"applied_torque={_round_tensor(asset.data.applied_torque[env_idx, joint_ids])}",
+            flush=True,
+        )
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         # initialize writer
@@ -178,6 +231,8 @@ class OnPolicyRunner:
                     actions = self.alg.act(obs, obs_history, commands, critic_obs)
                     # add critic_obs_buf to step returns, make sure it updates in every for loop
                     (obs, rewards, dones, infos) = self.env.step(actions)
+                    if self.env.num_envs == 1:
+                        self._print_action_debug(step_idx=i)
 
                     critic_obs = infos["observations"]["critic"]
                     obs_history = infos["observations"]["obsHistory"].flatten(start_dim=1)

@@ -11,7 +11,7 @@ title = "pongbot_r2_isaaclab"
 author = "Xiong Hongwei, Wang Bobin"
 maintainer = "Xiong Hongwei, Wang Bobin"
 description="Locomotion and direct RL tasks for Pongbot R2 in IsaacLab"
-repository = "https://github.com/81578823/bipedal_locomotion_isaaclab.git"
+repository = "https://github.com/81578823/pongbot_r2_isaaclab.git"
 keywords = ["isaaclab", "pongbot", "r2", "locomotion"]
 
 [dependencies]

@@ -1,14 +1,13 @@
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
-from bipedal_locomotion.utils.wrappers.rsl_rl.rl_mlp_cfg import EncoderCfg, RslRlPpoAlgorithmMlpCfg
-
+from pongbot_r2.utils.wrappers.rsl_rl.rl_mlp_cfg import EncoderCfg, RslRlPpoAlgorithmMlpCfg
 
 # Isaac Lab original RSL-RL configuration
 @configclass
 class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 14
+    num_steps_per_env = 24
     max_iterations = 2000
-    save_interval = 500
+    save_interval = 200
     experiment_name = "pongbot_r2_direct"
     empirical_normalization = False
     policy = RslRlPpoActorCriticCfg(
@@ -74,7 +73,7 @@ class PongBot_R2FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 class PongBot_R2RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 2000
-    save_interval = 500
+    save_interval = 200
     experiment_name = "pongbot_r2_rough"
     empirical_normalization = False
     policy = RslRlPpoActorCriticCfg(
@@ -111,7 +110,7 @@ class PongBot_R2RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 class PongBot_R2StairPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations =2000
-    save_interval = 500
+    save_interval = 200
     experiment_name = "pongbot_r2_stair"
     empirical_normalization = False
     policy = RslRlPpoActorCriticCfg(

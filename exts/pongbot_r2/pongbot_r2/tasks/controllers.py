@@ -47,8 +47,8 @@ class BaseController(ABC):
         """Stop the listener thread safely."""
         print(f"\n\033[93m[INFO] Stopping {self.__class__.__name__}...\033[0m")
         self._stop_event.set()
-        if self.thread:
-            self.thread.join()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=0.5)
         print(f"\033[92m[INFO] {self.__class__.__name__} stopped.\033[0m")
 
     def get_commands(self) -> torch.Tensor:
@@ -126,12 +126,11 @@ class LocalKeyboardController(BaseController):
         self.pynput_listener.join()
 
     def stop(self):
-        super().stop()
         self.pynput_listener.stop()
+        super().stop()
 
     def get_commands(self) -> torch.Tensor:
         current_commands = torch.zeros(1, 3)
-        current_commands[0, 0] = 0.1
         if self.key_states['w']: current_commands[0, 0] = self.cfg.command_plus_x_range
         if self.key_states['s']: current_commands[0, 0] = self.cfg.command_minus_x_range
         if self.key_states['a']: current_commands[0, 1] = self.cfg.command_plus_y_range
@@ -166,7 +165,7 @@ class JoystickController(BaseController):
             pygame.event.get()
 
             vx_axis = -self.joystick.get_axis(1)
-            vy_axis = self.joystick.get_axis(0)
+            vy_axis = -self.joystick.get_axis(0)
             vyaw_axis = self.joystick.get_axis(3)
 
             vx = vx_axis if abs(vx_axis) > self.deadzone else 0.0
