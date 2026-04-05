@@ -514,7 +514,10 @@ def base_com_height(
         sensor: RayCaster = env.scene[sensor_cfg.name]
         # Adjust the target height using the sensor data
         ray_hits_z = sensor.data.ray_hits_w[..., 2]
-        adjusted_target_height = target_height + torch.mean(ray_hits_z, dim=1)
+        finite_hits = torch.isfinite(ray_hits_z)
+        sanitized_hits = torch.where(finite_hits, ray_hits_z, torch.zeros_like(ray_hits_z))
+        hit_counts = finite_hits.sum(dim=1).clamp(min=1)
+        adjusted_target_height = target_height + sanitized_hits.sum(dim=1) / hit_counts
     else:
         # Use the provided target height directly for flat terrain
         adjusted_target_height = target_height
