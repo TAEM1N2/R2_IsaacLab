@@ -33,6 +33,7 @@ import os
 from collections import deque
 import statistics
 import matplotlib.pyplot as plt
+from pathlib import Path
 
 from torch.utils.tensorboard import SummaryWriter
 import torch
@@ -122,10 +123,54 @@ class OnPolicyRunner:
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
+        self.nan_debug_enabled = True
+        self.nan_debug_dir = Path(self.log_dir or os.getcwd()) / "nan_debug"
+        self.nan_debug_dir.mkdir(parents=True, exist_ok=True)
+        if hasattr(self.alg, "set_nan_debug_dir"):
+            self.alg.set_nan_debug_dir(str(self.nan_debug_dir))
 
         # _, _ = self.env.reset()
         _ = self.env.reset()
         self._print_actuator_gains_once()
+
+    @staticmethod
+    def _tensor_stats(tensor: torch.Tensor) -> dict:
+        finite = torch.isfinite(tensor)
+        stats = {
+            "shape": tuple(tensor.shape),
+            "dtype": str(tensor.dtype),
+            "device": str(tensor.device),
+            "num_bad": int((~finite).sum().item()),
+        }
+        if finite.any():
+            finite_values = tensor[finite]
+            stats.update(
+                {
+                    "min": float(finite_values.min().item()),
+                    "max": float(finite_values.max().item()),
+                    "mean": float(finite_values.mean().item()),
+                    "std": float(finite_values.std().item()) if finite_values.numel() > 1 else 0.0,
+                }
+            )
+        return stats
+
+    def _check_tensor_finite(self, name: str, tensor: torch.Tensor, context: dict) -> None:
+        if not self.nan_debug_enabled or torch.isfinite(tensor).all():
+            return
+        dump_path = self.nan_debug_dir / (
+            f"runner_nan_it{context.get('iteration', -1)}_step{context.get('rollout_step', -1)}_{name}.pt"
+        )
+        payload = {
+            "context": context,
+            "name": name,
+            "stats": self._tensor_stats(tensor),
+            "tensor": tensor.detach().cpu(),
+        }
+        torch.save(payload, dump_path)
+        print(f"[NAN_DEBUG] Invalid values detected in {name}. dump={dump_path}", flush=True)
+        print(f"[NAN_DEBUG] Context: {context}", flush=True)
+        print(f"[NAN_DEBUG] Stats: {payload['stats']}", flush=True)
+        raise RuntimeError(f"{name} contains NaN/Inf")
 
     def _print_actuator_gains_once(self) -> None:
         """Print actuator kp/kd gains for env 0 once at startup."""
@@ -237,6 +282,13 @@ class OnPolicyRunner:
             # Rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
+                    debug_context = {"iteration": it, "rollout_step": i}
+                    if hasattr(self.alg, "set_nan_debug_context"):
+                        self.alg.set_nan_debug_context(**debug_context)
+                    self._check_tensor_finite("obs_pre_act", obs, debug_context)
+                    self._check_tensor_finite("obs_history_pre_act", obs_history, debug_context)
+                    self._check_tensor_finite("commands_pre_act", commands, debug_context)
+                    self._check_tensor_finite("critic_obs_pre_act", critic_obs, debug_context)
                     actions = self.alg.act(obs, obs_history, commands, critic_obs)
                     # add critic_obs_buf to step returns, make sure it updates in every for loop
                     (obs, rewards, dones, infos) = self.env.step(actions)
@@ -256,6 +308,11 @@ class OnPolicyRunner:
                         rewards.to(self.device),
                         dones.to(self.device),
                     )
+                    self._check_tensor_finite("obs_post_step", obs, debug_context)
+                    self._check_tensor_finite("obs_history_post_step", obs_history, debug_context)
+                    self._check_tensor_finite("commands_post_step", commands, debug_context)
+                    self._check_tensor_finite("critic_obs_post_step", critic_obs, debug_context)
+                    self._check_tensor_finite("rewards_post_step", rewards, debug_context)
                     self.alg.process_env_step(rewards, dones, infos, obs)
 
                     if self.log_dir is not None:

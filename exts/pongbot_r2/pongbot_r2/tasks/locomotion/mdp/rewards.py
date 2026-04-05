@@ -6,10 +6,12 @@ specify the reward function and its parameters.
 
 from __future__ import annotations
 
+import os
 import numpy as np
 import torch
 from torch import distributions
 from typing import TYPE_CHECKING, Optional
+from pathlib import Path
 
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
@@ -19,6 +21,71 @@ import isaaclab.utils.math as math_utils
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
     from isaaclab.managers import RewardTermCfg
+
+
+def _tensor_stats(tensor: torch.Tensor) -> dict:
+    finite = torch.isfinite(tensor)
+    stats = {
+        "shape": tuple(tensor.shape),
+        "dtype": str(tensor.dtype),
+        "device": str(tensor.device),
+        "num_bad": int((~finite).sum().item()),
+    }
+    if finite.any():
+        finite_values = tensor[finite]
+        stats.update(
+            {
+                "min": float(finite_values.min().item()),
+                "max": float(finite_values.max().item()),
+                "mean": float(finite_values.mean().item()),
+                "std": float(finite_values.std().item()) if finite_values.numel() > 1 else 0.0,
+            }
+        )
+    return stats
+
+
+def _reward_debug_dir() -> Path:
+    debug_dir = Path(os.getcwd()) / "nan_debug_rewards"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    return debug_dir
+
+
+def _check_reward_finite(
+    env: ManagerBasedRLEnv,
+    reward_name: str,
+    reward: torch.Tensor,
+    extra_tensors: dict[str, torch.Tensor] | None = None,
+) -> torch.Tensor:
+    if torch.isfinite(reward).all():
+        return reward
+
+    bad_mask = ~torch.isfinite(reward)
+    bad_indices = bad_mask.nonzero(as_tuple=False).detach().cpu()
+    payload = {
+        "reward_name": reward_name,
+        "step_dt": float(env.step_dt),
+        "common_step_counter": int(getattr(env, "common_step_counter", -1)),
+        "episode_length_buf_bad": env.episode_length_buf[bad_mask].detach().cpu(),
+        "bad_indices": bad_indices,
+        "reward_stats": _tensor_stats(reward),
+        "reward": reward.detach().cpu(),
+    }
+    if extra_tensors:
+        payload["extra_stats"] = {name: _tensor_stats(tensor) for name, tensor in extra_tensors.items()}
+        payload["extra_tensors"] = {name: tensor.detach().cpu() for name, tensor in extra_tensors.items()}
+
+    dump_path = _reward_debug_dir() / (
+        f"{reward_name}_step{payload['common_step_counter']}_env"
+        f"{bad_indices[0].item() if bad_indices.numel() > 0 else -1}.pt"
+    )
+    torch.save(payload, dump_path)
+    print(f"[REWARD_NAN_DEBUG] Invalid values detected in reward term '{reward_name}'. dump={dump_path}", flush=True)
+    print(
+        f"[REWARD_NAN_DEBUG] bad_indices={bad_indices.squeeze(-1).tolist()} "
+        f"stats={payload['reward_stats']}",
+        flush=True,
+    )
+    raise RuntimeError(f"Reward term '{reward_name}' contains NaN/Inf")
 
 
 def lin_vel_error(
@@ -87,7 +154,16 @@ def foot_landing_vel(
     about_to_land = (foot_heights < about_landing_threshold) & (~contacts) & (z_vels < 0.0)
     landing_z_vels = torch.where(about_to_land, z_vels, torch.zeros_like(z_vels))
     reward = torch.sum(torch.square(landing_z_vels), dim=1)
-    return reward
+    return _check_reward_finite(
+        env,
+        "foot_landing_vel",
+        reward,
+        {
+            "z_vels": z_vels,
+            "foot_heights": foot_heights,
+            "terrain_z": terrain_z if torch.is_tensor(terrain_z) else torch.tensor(terrain_z, device=reward.device),
+        },
+    )
 
 def joint_powers_l1(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """Penalize joint powers on the articulation using L1-kernel"""
@@ -314,7 +390,12 @@ def stand_still(
     reward_ang = torch.abs(base_ang_vel) * (torch.abs(ang_commands) < ang_threshold)
 
     total_reward = reward_lin + reward_ang
-    return total_reward
+    return _check_reward_finite(
+        env,
+        "stand_still",
+        total_reward,
+        {"base_lin_vel": base_lin_vel, "base_ang_vel": base_ang_vel, "commands": commands},
+    )
 
 
 # def feet_regulation(
@@ -375,7 +456,18 @@ def feet_regulation(env: ManagerBasedRLEnv,
 
     height_scale = torch.exp(-feet_height / base_height_target)
     reward = torch.sum(height_scale * torch.square(torch.norm(feet_vel_xy, dim=-1)), dim=1)
-    return reward
+    return _check_reward_finite(
+        env,
+        "feet_regulation",
+        reward,
+        {
+            "feet_positions": feet_positions,
+            "terrain_z": terrain_z if torch.is_tensor(terrain_z) else torch.tensor(terrain_z, device=reward.device),
+            "feet_height": feet_height,
+            "feet_vel_xy": feet_vel_xy,
+            "height_scale": height_scale,
+        },
+    )
 
 
 def base_height_rough_l2(
@@ -395,7 +487,13 @@ def base_height_rough_l2(
     height = asset.data.root_pos_w[:, 2].unsqueeze(1) - sensor.data.ray_hits_w[:, :, 2]
     # sensor.data.ray_hits_w can be inf, so we clip it to avoid NaN
     height = torch.nan_to_num(height, nan=target_height, posinf=target_height, neginf=target_height)
-    return torch.square(height.mean(dim=1) - target_height)
+    reward = torch.square(height.mean(dim=1) - target_height)
+    return _check_reward_finite(
+        env,
+        "base_height_rough_l2",
+        reward,
+        {"height": height, "ray_hits_z": sensor.data.ray_hits_w[:, :, 2]},
+    )
 
 
 def base_com_height(
@@ -415,12 +513,21 @@ def base_com_height(
     if sensor_cfg is not None:
         sensor: RayCaster = env.scene[sensor_cfg.name]
         # Adjust the target height using the sensor data
-        adjusted_target_height = target_height + torch.mean(sensor.data.ray_hits_w[..., 2], dim=1)
+        ray_hits_z = sensor.data.ray_hits_w[..., 2]
+        adjusted_target_height = target_height + torch.mean(ray_hits_z, dim=1)
     else:
         # Use the provided target height directly for flat terrain
         adjusted_target_height = target_height
+        ray_hits_z = None
     # Compute the L2 squared penalty
-    return torch.abs(asset.data.root_pos_w[:, 2] - adjusted_target_height)
+    reward = torch.abs(asset.data.root_pos_w[:, 2] - adjusted_target_height)
+    extra = {
+        "root_pos_z": asset.data.root_pos_w[:, 2],
+        "adjusted_target_height": adjusted_target_height,
+    }
+    if ray_hits_z is not None:
+        extra["ray_hits_z"] = ray_hits_z
+    return _check_reward_finite(env, "base_com_height", reward, extra)
 
 
 class GaitReward(ManagerTermBase):
@@ -489,7 +596,19 @@ class GaitReward(ManagerTermBase):
 
         # Combine rewards
         total_reward = force_reward + velocity_reward
-        return total_reward
+        return _check_reward_finite(
+            env,
+            "GaitReward",
+            total_reward,
+            {
+                "gait_params": gait_params,
+                "desired_contact_states": desired_contact_states,
+                "foot_forces": foot_forces,
+                "foot_velocities": foot_velocities,
+                "force_reward": force_reward,
+                "velocity_reward": velocity_reward,
+            },
+        )
 
     def compute_contact_targets(self, gait_params):
         """Calculate desired contact states for the current timestep."""
@@ -641,4 +760,4 @@ class ActionSmoothnessPenalty(ManagerTermBase):
         penalty[startup_env_mask] = 0
 
         # Return the penalty scaled by the configured weight
-        return penalty
+        return _check_reward_finite(env, "ActionSmoothnessPenalty", penalty, {"current_action": current_action})

@@ -31,6 +31,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from pathlib import Path
 
 from rsl_rl.modules import ActorCritic, MLP_Encoder, IMU_Encoder
 from rsl_rl.storage import RolloutStorage
@@ -401,9 +402,70 @@ class IMU_PPO:
         self.use_clipped_value_loss = use_clipped_value_loss
         self.encoder_warmup_iters = kwargs.pop("encoder_warmup_iters", 0)
         self.learning_iteration = 0
+        self.nan_debug_dir = Path.cwd() / "nan_debug"
+        self.nan_debug_context = {}
 
     def set_learning_iteration(self, iteration: int):
         self.learning_iteration = iteration
+
+    def set_nan_debug_dir(self, path: str):
+        self.nan_debug_dir = Path(path)
+        self.nan_debug_dir.mkdir(parents=True, exist_ok=True)
+
+    def set_nan_debug_context(self, **context):
+        self.nan_debug_context = context
+
+    @staticmethod
+    def _tensor_stats(tensor: torch.Tensor) -> dict:
+        finite = torch.isfinite(tensor)
+        stats = {
+            "shape": tuple(tensor.shape),
+            "dtype": str(tensor.dtype),
+            "device": str(tensor.device),
+            "num_bad": int((~finite).sum().item()),
+        }
+        if finite.any():
+            finite_values = tensor[finite]
+            stats.update(
+                {
+                    "min": float(finite_values.min().item()),
+                    "max": float(finite_values.max().item()),
+                    "mean": float(finite_values.mean().item()),
+                    "std": float(finite_values.std().item()) if finite_values.numel() > 1 else 0.0,
+                }
+            )
+        return stats
+
+    def _dump_invalid_tensor(self, name: str, tensor: torch.Tensor, extra: dict | None = None) -> None:
+        context = {"learning_iteration": self.learning_iteration, **self.nan_debug_context}
+        if extra:
+            context.update(extra)
+        self.nan_debug_dir.mkdir(parents=True, exist_ok=True)
+        dump_path = self.nan_debug_dir / (
+            f"algo_nan_it{context.get('iteration', context.get('learning_iteration', -1))}"
+            f"_step{context.get('rollout_step', -1)}_mb{context.get('mini_batch', -1)}_{name}.pt"
+        )
+        payload = {
+            "context": context,
+            "name": name,
+            "stats": self._tensor_stats(tensor),
+            "tensor": tensor.detach().cpu(),
+        }
+        torch.save(payload, dump_path)
+        print(f"[NAN_DEBUG] Invalid values detected in {name}. dump={dump_path}", flush=True)
+        print(f"[NAN_DEBUG] Context: {context}", flush=True)
+        print(f"[NAN_DEBUG] Stats: {payload['stats']}", flush=True)
+        raise RuntimeError(f"{name} contains NaN/Inf")
+
+    def _check_finite(self, name: str, tensor: torch.Tensor, extra: dict | None = None) -> None:
+        if torch.isfinite(tensor).all():
+            return
+        self._dump_invalid_tensor(name, tensor, extra)
+
+    def _check_module_params(self, module: nn.Module, module_name: str, extra: dict | None = None) -> None:
+        for name, param in module.named_parameters():
+            if not torch.isfinite(param).all():
+                self._dump_invalid_tensor(f"{module_name}.{name}", param, extra)
 
     def _build_actor_obs(self, obs, encoder_out, commands):
         actor_obs = obs
@@ -440,17 +502,27 @@ class IMU_PPO:
         self.actor_critic.train()
 
     def act(self, obs, obs_history, commands, critic_obs):
+        self._check_finite("act.obs", obs)
+        self._check_finite("act.obs_history", obs_history)
+        self._check_finite("act.commands", commands)
+        self._check_finite("act.critic_obs", critic_obs)
         critic_obs = torch.cat((critic_obs, commands), dim=-1)
         # act
         encoder_out = self.encoder.encode(obs_history)
+        self._check_finite("act.encoder_out", encoder_out)
+        actor_obs = self._build_actor_obs(obs, encoder_out, commands)
+        self._check_finite("act.actor_obs", actor_obs)
         self.transition.actions = self.actor_critic.act(
-            self._build_actor_obs(obs, encoder_out, commands)
+            actor_obs
         ).detach()
+        self._check_finite("act.action_mean", self.actor_critic.action_mean)
+        self._check_finite("act.actions", self.transition.actions)
 
         # evaluate
         if self.critic_take_latent:
             critic_obs = torch.cat((critic_obs, encoder_out), dim=-1)
         self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
+        self._check_finite("act.values", self.transition.values)
 
         # storage
         self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(
@@ -496,7 +568,7 @@ class IMU_PPO:
             self.num_mini_batches,
             self.num_learning_epochs,
         )
-        for (
+        for mini_batch_idx, (
             obs_batch,
             critic_obs_batch,
             obs_history_batch, _,
@@ -508,19 +580,36 @@ class IMU_PPO:
             old_actions_log_prob_batch,
             old_mu_batch,
             old_sigma_batch,
-        ) in generator:
+        ) in enumerate(generator):
+            batch_context = {"mini_batch": mini_batch_idx}
+            self._check_finite("update.obs_batch", obs_batch, batch_context)
+            self._check_finite("update.critic_obs_batch", critic_obs_batch, batch_context)
+            self._check_finite("update.obs_history_batch", obs_history_batch, batch_context)
+            self._check_finite("update.commands_batch", group_commands_batch, batch_context)
+            self._check_finite("update.actions_batch", actions_batch, batch_context)
+            self._check_finite("update.advantages_batch", advantages_batch, batch_context)
+            self._check_finite("update.returns_batch", returns_batch, batch_context)
             encoder_out_batch = self.encoder.encode(obs_history_batch)
+            self._check_finite("update.encoder_out_batch", encoder_out_batch, batch_context)
             commands_batch = group_commands_batch
-            self.actor_critic.act(self._build_actor_obs(obs_batch, encoder_out_batch, commands_batch))
+            actor_obs_batch = self._build_actor_obs(obs_batch, encoder_out_batch, commands_batch)
+            self._check_finite("update.actor_obs_batch", actor_obs_batch, batch_context)
+            self.actor_critic.act(actor_obs_batch)
+            self._check_finite("update.action_mean", self.actor_critic.action_mean, batch_context)
 
             actions_log_prob_batch = self.actor_critic.get_actions_log_prob(
                 actions_batch
             )
+            self._check_finite("update.actions_log_prob_batch", actions_log_prob_batch, batch_context)
 
             value_batch = self.actor_critic.evaluate(critic_obs_batch)
             mu_batch = self.actor_critic.action_mean
             sigma_batch = self.actor_critic.action_std
             entropy_batch = self.actor_critic.entropy
+            self._check_finite("update.value_batch", value_batch, batch_context)
+            self._check_finite("update.mu_batch", mu_batch, batch_context)
+            self._check_finite("update.sigma_batch", sigma_batch, batch_context)
+            self._check_finite("update.entropy_batch", entropy_batch, batch_context)
 
             kl_mean = torch.tensor(0, device=self.device, requires_grad=False)
             with torch.inference_mode():
@@ -535,6 +624,7 @@ class IMU_PPO:
                     axis=-1,
                 )
                 kl_mean = torch.mean(kl)
+            self._check_finite("update.kl_mean", kl_mean, batch_context)
 
             # KL
             if self.desired_kl != None and self.schedule == "adaptive":
@@ -580,6 +670,9 @@ class IMU_PPO:
                 + self.value_loss_coef * value_loss
                 - self.entropy_coef * entropy_batch_mean
             )
+            self._check_finite("update.surrogate_loss", surrogate_loss, batch_context)
+            self._check_finite("update.value_loss", value_loss, batch_context)
+            self._check_finite("update.loss", loss, batch_context)
 
             if self.anneal_lr:
                 frac = 1.0 - num_updates / (
@@ -591,7 +684,9 @@ class IMU_PPO:
             self.optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+            self._check_module_params(self.actor_critic, "actor_critic_pre_step", batch_context)
             self.optimizer.step()
+            self._check_module_params(self.actor_critic, "actor_critic_post_step", batch_context)
 
             num_updates += 1
             mean_value_loss += value_loss.item()
@@ -604,14 +699,19 @@ class IMU_PPO:
             generator = self.storage.encoder_mini_batch_generator(
                 self.num_mini_batches, self.num_learning_epochs
             )
-            for (
+            for mini_batch_idx, (
                 next_obs_batch,
                 critic_obs_batch,
                 obs_history_batch,
-            ) in generator:
+            ) in enumerate(generator):
+                batch_context = {"encoder_mini_batch": mini_batch_idx}
+                self._check_finite("encoder.next_obs_batch", next_obs_batch, batch_context)
+                self._check_finite("encoder.critic_obs_batch", critic_obs_batch, batch_context)
+                self._check_finite("encoder.obs_history_batch", obs_history_batch, batch_context)
                 if hasattr(self.encoder, "get_encoder_out"):
                     self.encoder.encode(obs_history_batch)
                     encode_batch = self.encoder.get_encoder_out()
+                    self._check_finite("encoder.encode_batch", encode_batch, batch_context)
 
                 if hasattr(self.encoder, "get_encoder_out"):
                     target_dim = self.encoder.num_output_dim
@@ -620,10 +720,12 @@ class IMU_PPO:
                     )
                 else:
                     extra_loss = torch.zeros_like(value_loss)
+                self._check_finite("encoder.extra_loss", extra_loss, batch_context)
 
                 self.extra_optimizer.zero_grad()
                 extra_loss.backward()
                 self.extra_optimizer.step()
+                self._check_module_params(self.encoder, "encoder_post_step", batch_context)
 
                 num_updates_extra += 1
                 mean_extra_loss += extra_loss.item()
