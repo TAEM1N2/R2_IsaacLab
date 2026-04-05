@@ -171,7 +171,45 @@ class PongBot_R2FlatIMUPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
         obs_history_len=10,
-        encoder_warmup_iters=0, #2000,
+        encoder_warmup_iters=2000,
+    )
+    encoder = IMUEncoderCfg(
+        output_detach=True,
+        num_output_dim=9,
+        hidden_dims=[256, 128],
+        activation="elu",
+        orthogonal_init=False,
+    )
+
+@configclass
+class PongBot_R2RoughIMUPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env = 24
+    max_iterations =5000
+    save_interval = 200
+    experiment_name = "pongbot_r2_rough_imu"
+    empirical_normalization = False
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        actor_hidden_dims=[512, 256, 128],
+        critic_hidden_dims=[512, 256, 128],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmMlpCfg(
+        class_name="IMU_PPO",
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.01,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=1.0e-3, #5e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+        obs_history_len=10,
+        encoder_warmup_iters=2000,
     )
     encoder = IMUEncoderCfg(
         output_detach=True,

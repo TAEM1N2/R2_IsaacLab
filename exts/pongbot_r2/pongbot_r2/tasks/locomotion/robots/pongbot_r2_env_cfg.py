@@ -186,6 +186,32 @@ class PFBlindRoughEnvCfg_PLAY(PFBaseEnvCfg_PLAY):
         self.scene.terrain.terrain_generator = BLIND_ROUGH_TERRAINS_PLAY_CFG
 
 
+@configclass
+class PFBlindRoughIMUEnvCfg(PFBaseIMUEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.height_scanner = _make_reward_height_scanner(self.decimation * self.sim.dt)
+        self.observations.critic.heights = None
+        self.rewards.pen_base_height.params["sensor_cfg"] = SceneEntityCfg("height_scanner")
+
+        self.scene.terrain.terrain_type = "generator"
+        self.scene.terrain.terrain_generator = BLIND_ROUGH_TERRAINS_CFG
+
+
+@configclass
+class PFBlindRoughIMUEnvCfg_PLAY(PFBaseIMUEnvCfg_PLAY):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.height_scanner = _make_reward_height_scanner(self.decimation * self.sim.dt)
+        self.observations.critic.heights = None
+        self.rewards.pen_base_height.params["sensor_cfg"] = SceneEntityCfg("height_scanner")
+
+        self.scene.terrain.terrain_type = "generator"
+        self.scene.terrain.max_init_terrain_level = None
+        self.scene.terrain.terrain_generator = BLIND_ROUGH_TERRAINS_PLAY_CFG
+
 ##############################
 # Pointfoot Blind Stairs Environment
 ##############################
@@ -300,5 +326,4 @@ class PFStairEnvCfgv1_PLAY(PFBaseEnvCfg_PLAY):
         self.scene.terrain.terrain_type = "generator"
         self.scene.terrain.max_init_terrain_level = None
         self.scene.terrain.terrain_generator = STAIRS_TERRAINS_PLAY_CFG.replace(difficulty_range=(0.5, 0.5))
-
 

@@ -369,12 +369,12 @@ class RewardsCfg:
     )
 
     # tracking related rewards
-    # rew_lin_vel_xy = RewTerm(
-    #     func=mdp.track_lin_vel_xy_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.1)}
-    # )
-    # rew_ang_vel_z = RewTerm(
-    #     func=mdp.track_ang_vel_z_exp, weight=0.5, params={"command_name": "base_velocity", "std": math.sqrt(0.1)}
-    # )
+    rew_lin_vel_xy = RewTerm(
+        func=mdp.track_lin_vel_xy_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.1)}
+    )
+    rew_ang_vel_z = RewTerm(
+        func=mdp.track_ang_vel_z_exp, weight=0.5, params={"command_name": "base_velocity", "std": math.sqrt(0.1)}
+    )
     rew_lin_vel_xy2 = RewTerm(
         func=mdp.track_lin_vel_xy_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
     )
@@ -496,20 +496,20 @@ class CurriculumCfg:
     """Curriculum terms for the MDP"""
 
     terrain_levels = CurrTerm(func=mdp.terrain_levels_vel)
-    # penalty_ramp = CurrTerm(
-    #     func=mdp.ramp_reward_terms_by_weight,
-    #     params={
-    #         "term_names": (
-    #             "pen_joint_torque",
-    #             "pen_joint_accel",
-    #             "pen_feet_slide",
-    #         ),
-    #         "start_scale": 0.5,
-    #         "end_scale": 1.0,
-    #         "start_step": 0,
-    #         "end_step": 80_000,
-    #     },
-    # )
+    penalty_ramp = CurrTerm(
+        func=mdp.ramp_reward_terms_by_weight,
+        params={
+            "term_names": (
+                "pen_joint_torque",
+                "pen_joint_accel",
+                "pen_feet_slide",
+            ),
+            "start_scale": 0.5,
+            "end_scale": 1.0,
+            "start_step": 0,
+            "end_step": 80_000,
+        },
+    )
 
 
 ########################
