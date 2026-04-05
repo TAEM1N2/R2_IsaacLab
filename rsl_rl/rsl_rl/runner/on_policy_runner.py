@@ -38,8 +38,8 @@ from torch.utils.tensorboard import SummaryWriter
 import torch
 import numpy as np
 
-from rsl_rl.algorithm import PPO
-from rsl_rl.modules import MLP_Encoder, ActorCritic
+from rsl_rl.algorithm import PPO, IMU_PPO
+from rsl_rl.modules import MLP_Encoder, IMU_Encoder, ActorCritic
 from rsl_rl.env import VecEnv
 
 
@@ -65,11 +65,15 @@ class OnPolicyRunner:
         privileged_input_size = num_critic_obs
         self.ecd_cfg["num_input_dim"] = self.obs_history_dim
 
-        encoder = eval("MLP_Encoder")(
+        encoder_class = {
+            "MLP_Encoder": MLP_Encoder,
+            "IMU_Encoder": IMU_Encoder,
+        }[self.ecd_cfg.pop("class_name", "MLP_Encoder")]
+        encoder = encoder_class(
             **self.ecd_cfg,
         ).to(self.device)
 
-        actor_critic_class = eval("ActorCritic")  # ActorCritic
+        actor_critic_class = ActorCritic
         actor_critic: ActorCritic = actor_critic_class(
             self.num_obs
             + encoder.num_output_dim
@@ -79,7 +83,10 @@ class OnPolicyRunner:
             **self.policy_cfg,
         ).to(self.device)
 
-        alg_class = eval(self.alg_cfg.pop("class_name"))
+        alg_class = {
+            "PPO": PPO,
+            "IMU_PPO": IMU_PPO,
+        }[self.alg_cfg.pop("class_name")]
         self.alg = alg_class(
             self.env.num_envs,
             encoder,
@@ -224,6 +231,8 @@ class OnPolicyRunner:
 
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
+            if hasattr(self.alg, "set_learning_iteration"):
+                self.alg.set_learning_iteration(it)
             start = time.time()
             # Rollout
             with torch.inference_mode():

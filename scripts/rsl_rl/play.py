@@ -234,20 +234,32 @@ class PolicyStreamCsvRecorder:
         self.step_count = 0
         self.obs_file = None
         self.action_file = None
+        self.imu_file = None
         self.obs_writer = None
         self.action_writer = None
+        self.imu_writer = None
         self._finished = False
 
         os.makedirs(self.output_dir, exist_ok=True)
 
-    def _init_writers(self, encoder_output: torch.Tensor, obs: torch.Tensor, vel_command: torch.Tensor, policy_output: torch.Tensor):
+    def _init_writers(
+        self,
+        encoder_output: torch.Tensor,
+        obs: torch.Tensor,
+        vel_command: torch.Tensor,
+        policy_output: torch.Tensor,
+        imu_gt: torch.Tensor | None = None,
+    ):
         obs_path = os.path.join(self.output_dir, "obs_IsaacLab.csv")
         action_path = os.path.join(self.output_dir, "action_IsaacLab.csv")
+        imu_path = os.path.join(self.output_dir, "imu_encoder.csv")
 
         self.obs_file = open(obs_path, "w", newline="", encoding="utf-8")
         self.action_file = open(action_path, "w", newline="", encoding="utf-8")
+        self.imu_file = open(imu_path, "w", newline="", encoding="utf-8")
         self.obs_writer = csv.writer(self.obs_file)
         self.action_writer = csv.writer(self.action_file)
+        self.imu_writer = csv.writer(self.imu_file)
 
         obs_header = ["step"]
         obs_header += [f"encoder_output_{i}" for i in range(encoder_output.shape[1])]
@@ -258,16 +270,28 @@ class PolicyStreamCsvRecorder:
 
         self.obs_writer.writerow(obs_header)
         self.action_writer.writerow(action_header)
+        if imu_gt is not None:
+            imu_header = ["step"]
+            imu_header += [f"imu_est_{i}" for i in range(imu_gt.shape[1])]
+            imu_header += [f"imu_gt_{i}" for i in range(imu_gt.shape[1])]
+            imu_header += [f"imu_err_{i}" for i in range(imu_gt.shape[1])]
+            imu_header += ["lin_vel_err_l2", "ang_vel_err_l2", "proj_gravity_err_l2", "imu_err_l2"]
+            self.imu_writer.writerow(imu_header)
 
     def record(
-        self, encoder_output: torch.Tensor, obs: torch.Tensor, vel_command: torch.Tensor, policy_output: torch.Tensor
+        self,
+        encoder_output: torch.Tensor,
+        obs: torch.Tensor,
+        vel_command: torch.Tensor,
+        policy_output: torch.Tensor,
+        imu_gt: torch.Tensor | None = None,
     ) -> None:
         if self._finished:
             return
 
         if self.start_time is None:
             self.start_time = 0
-            self._init_writers(encoder_output, obs, vel_command, policy_output)
+            self._init_writers(encoder_output, obs, vel_command, policy_output, imu_gt)
 
         if self.step_count >= self.max_steps:
             self._finished = True
@@ -286,6 +310,23 @@ class PolicyStreamCsvRecorder:
         self.action_writer.writerow(action_row)
         self.action_file.flush()
 
+        if imu_gt is not None:
+            imu_est = encoder_output[0, : imu_gt.shape[1]]
+            imu_gt_env0 = imu_gt[0]
+            imu_err = imu_est - imu_gt_env0
+            imu_row = [self.step_count]
+            imu_row += imu_est.detach().cpu().tolist()
+            imu_row += imu_gt_env0.detach().cpu().tolist()
+            imu_row += imu_err.detach().cpu().tolist()
+            imu_row += [
+                torch.norm(imu_err[0:3]).item(),
+                torch.norm(imu_err[3:6]).item(),
+                torch.norm(imu_err[6:9]).item(),
+                torch.norm(imu_err).item(),
+            ]
+            self.imu_writer.writerow(imu_row)
+            self.imu_file.flush()
+
         self.step_count += 1
         if self.step_count >= self.max_steps:
             self._finished = True
@@ -296,6 +337,8 @@ class PolicyStreamCsvRecorder:
             self.obs_file.close()
         if self.action_file is not None and not self.action_file.closed:
             self.action_file.close()
+        if self.imu_file is not None and not self.imu_file.closed:
+            self.imu_file.close()
 
 
 def main():
@@ -396,9 +439,12 @@ def main():
         obs_history = obs_dict["observations"].get("obsHistory")
         obs_history = obs_history.flatten(start_dim=1)
         commands = obs_dict["observations"].get("commands")
+        critic_obs = obs_dict["observations"].get("critic")
         if controller is not None:
             commands = _apply_manual_command(env, controller.get_commands())
         # simulate environment
+        imu_log_period = 50
+        step_count = 0
         while simulation_app.is_running():
             # run everything in inference mode
             with torch.inference_mode():
@@ -406,18 +452,38 @@ def main():
                     commands = _apply_manual_command(env, controller.get_commands())
                 # agent stepping
                 est = encoder(obs_history)
-                actions = policy(torch.cat((est, obs, commands), dim=-1).detach())
+                imu_gt = None
+                if est.shape[1] >= 9 and critic_obs is not None and critic_obs.shape[1] >= 9:
+                    imu_gt = critic_obs[:, :9]
+                    if step_count % imu_log_period == 0:
+                        imu_err = est[0, :9] - imu_gt[0]
+                        print(
+                            "[IMU_EST]",
+                            f"step={step_count}",
+                            f"lin_vel_l2={torch.norm(imu_err[0:3]).item():.4f}",
+                            f"ang_vel_l2={torch.norm(imu_err[3:6]).item():.4f}",
+                            f"proj_gravity_l2={torch.norm(imu_err[6:9]).item():.4f}",
+                            f"imu_l2={torch.norm(imu_err).item():.4f}",
+                            flush=True,
+                        )
+                actor_obs = obs
+                if est.shape[1] >= 9 and obs.shape[1] >= 6:
+                    actor_obs = obs.clone()
+                    actor_obs[:, 0:6] = est[:, 3:9]
+                actions = policy(torch.cat((est, actor_obs, commands), dim=-1).detach())
                 if policy_stream_publisher is not None:
                     policy_stream_publisher.publish(est, obs, commands, actions)
                 if policy_stream_recorder is not None:
-                    policy_stream_recorder.record(est, obs, commands, actions)
+                    policy_stream_recorder.record(est, obs, commands, actions, imu_gt)
                 # env stepping
                 obs, _, _, infos = env.step(actions)
                 obs_history = infos["observations"].get("obsHistory")
                 obs_history = obs_history.flatten(start_dim=1)
                 commands = infos["observations"].get("commands")
+                critic_obs = infos["observations"].get("critic")
                 if controller is not None:
                     commands = _apply_manual_command(env, controller.get_commands())
+                step_count += 1
     finally:
         if controller is not None:
             controller.stop()

@@ -17,13 +17,25 @@ class RslRlPpoAlgorithmMlpCfg(RslRlPpoAlgorithmCfg):
     # runner_type: str = "OnPolicyRunner"
 
     obs_history_len: int = 1
+    encoder_warmup_iters: int = 0
 
 
 @configclass
 class EncoderCfg:
+    class_name: str = "MLP_Encoder"
     output_detach : bool = True
     num_input_dim : int = MISSING
     num_output_dim : int = 3
+    hidden_dims : list[int] = [256, 128]
+    activation : str = "elu"
+    orthogonal_init : bool = False
+
+@configclass
+class IMUEncoderCfg:
+    class_name: str = "IMU_Encoder"
+    output_detach : bool = True
+    num_input_dim : int = MISSING
+    num_output_dim : int = 9
     hidden_dims : list[int] = [256, 128]
     activation : str = "elu"
     orthogonal_init : bool = False

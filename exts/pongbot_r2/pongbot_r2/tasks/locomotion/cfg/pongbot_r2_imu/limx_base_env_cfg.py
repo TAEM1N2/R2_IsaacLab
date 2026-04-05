@@ -419,7 +419,7 @@ class RewardsCfg:
         },
         weight=-0.5, #-0.5,
     )
-    pen_flat_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-0.25) #-0.5)
+    pen_flat_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-0.5) #-0.5)
 
     # ===== Fixed Auxiliary =====
     # ===== 
@@ -427,7 +427,7 @@ class RewardsCfg:
     pen_ang_vel_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-1e-3) 
     pen_feet_regulation = RewTerm(
         func=mdp.feet_regulation,
-        weight=-0.0, #-0.001,
+        weight=-0.001,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=[".*TIP"]),
                 "base_height_target": 0.55, "foot_radius": 0.03},
     )
@@ -448,7 +448,7 @@ class RewardsCfg:
     # pen_action_smoothness = RewTerm(func=mdp.ActionSmoothnessPenalty, weight=-1.0e-3)
     # pen_joint_powers = RewTerm(func=mdp.joint_powers_l1, weight=-5.0e-5)
     # pen_joint_powers_var = RewTerm(func=mdp.joint_powers_var, weight=-2.5e-6)
-    pen_joint_default_pos = RewTerm(func=mdp.joint_deviation_l1, weight = -0.01)
+    pen_joint_default_pos = RewTerm(func=mdp.joint_deviation_l1, weight = -0.05)
     
     pen_feet_slide = RewTerm(
         func=mdp.feet_slide,
@@ -502,9 +502,7 @@ class CurriculumCfg:
     #         "term_names": (
     #             "pen_joint_torque",
     #             "pen_joint_accel",
-    #             "pen_joint_powers",
-    #             "pen_joint_powers_var",
-    #             "foot_landing_vel",
+    #             "pen_feet_slide",
     #         ),
     #         "start_scale": 0.5,
     #         "end_scale": 1.0,

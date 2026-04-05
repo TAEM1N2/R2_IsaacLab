@@ -20,6 +20,33 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
     from isaaclab.managers import RewardTermCfg
 
+
+def lin_vel_error(
+    env: ManagerBasedRLEnv, std: float, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Reward tracking of linear velocity commands (xy axes) using exponential kernel."""
+    # extract the used quantities (to enable type-hinting)
+    asset: RigidObject = env.scene[asset_cfg.name]
+    # compute the error
+    lin_vel_error = torch.sum(
+        torch.square(env.command_manager.get_command(command_name)[:, :2] - asset.data.root_lin_vel_b[:, :2]),
+        dim=1,
+    )
+    return torch.exp(lin_vel_error / std**2)
+
+
+def ang_vel_error(
+    env: ManagerBasedRLEnv, std: float, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Reward tracking of angular velocity commands (yaw) using exponential kernel."""
+    # extract the used quantities (to enable type-hinting)
+    asset: RigidObject = env.scene[asset_cfg.name]
+    # compute the error
+    ang_vel_error = torch.square(env.command_manager.get_command(command_name)[:, 2] - asset.data.root_ang_vel_b[:, 2])
+    return torch.exp(ang_vel_error / std**2)
+
+
+
 def stay_alive(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Reward for staying alive."""
     return torch.ones(env.num_envs, device=env.device)

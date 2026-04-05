@@ -149,6 +149,24 @@ def randomize_rigid_body_coms(
 
     asset.root_physx_view.set_coms(coms, env_ids)
 
+def set_zero_command(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    command_name: str = "base_velocity",
+    duration_s: float = 2.0,
+):
+    """Set the selected command term to zero and hold it for the given duration."""
+    command_term = env.command_manager.get_term(command_name)
+
+    if env_ids is None:
+        command_term.command.zero_()
+        command_term.time_left.fill_(duration_s)
+        return
+
+    env_ids = env_ids.to(device=command_term.command.device)
+    command_term.command[env_ids] = 0.0
+    command_term.time_left[env_ids] = duration_s
+
 
 """
 Internal helper functions.

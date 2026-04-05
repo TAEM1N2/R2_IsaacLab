@@ -1,6 +1,7 @@
 import gymnasium as gym
 
-from pongbot_r2.tasks.locomotion.agents.rsl_rl_ppo_cfg import PongBot_R2FlatPPORunnerCfg, PongBot_R2RoughPPORunnerCfg, PongBot_R2StairPPORunnerCfg
+from pongbot_r2.tasks.locomotion.agents.rsl_rl_ppo_cfg import PongBot_R2FlatPPORunnerCfg, PongBot_R2RoughPPORunnerCfg, PongBot_R2StairPPORunnerCfg, \
+PongBot_R2FlatIMUPPORunnerCfg
 
 from . import pongbot_r2_env_cfg
 
@@ -11,6 +12,7 @@ from . import pongbot_r2_env_cfg
 pongbot_r2_blind_flat_runner_cfg = PongBot_R2FlatPPORunnerCfg()
 pongbot_r2_blind_rough_runner_cfg= PongBot_R2RoughPPORunnerCfg()
 pongbot_r2_stair_runner_cfg= PongBot_R2StairPPORunnerCfg()
+pongbot_r2_blind_flat_imu_runner_cfg = PongBot_R2FlatIMUPPORunnerCfg()
 
 ##
 # Register Gym environments
@@ -105,5 +107,30 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": pongbot_r2_env_cfg.PFStairEnvCfgv1_PLAY,
         "rsl_rl_cfg_entry_point": pongbot_r2_stair_runner_cfg,
+    },
+)
+
+
+
+############################
+# imu encoder 
+############################
+gym.register(
+    id="PongBot-R2-Imu-Flat-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": pongbot_r2_env_cfg.PFBlindFlatIMUEnvCfg,
+        "rsl_rl_cfg_entry_point": pongbot_r2_blind_flat_imu_runner_cfg,
+    },
+)
+
+gym.register(
+    id="PongBot-R2-Imu-Flat-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": pongbot_r2_env_cfg.PFBlindFlatIMUEnvCfg_PLAY,
+        "rsl_rl_cfg_entry_point": pongbot_r2_blind_flat_imu_runner_cfg,
     },
 )

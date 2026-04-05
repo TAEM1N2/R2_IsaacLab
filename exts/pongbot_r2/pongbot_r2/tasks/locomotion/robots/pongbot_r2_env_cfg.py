@@ -4,6 +4,7 @@ from isaaclab.utils import configclass
 
 from pongbot_r2.assets.config.pongbot_r2 import PONGBOT_R2_CFG
 from pongbot_r2.tasks.locomotion.cfg.pongbot_r2.limx_base_env_cfg import PFEnvCfg
+from pongbot_r2.tasks.locomotion.cfg.pongbot_r2_imu.limx_base_env_cfg import PFEnvCfg as PFIMUEnvCfg
 from pongbot_r2.tasks.locomotion.cfg.pongbot_r2.terrains_cfg import (
     BLIND_ROUGH_TERRAINS_CFG,
     BLIND_ROUGH_TERRAINS_PLAY_CFG,
@@ -72,6 +73,35 @@ class PFBaseEnvCfg_PLAY(PFBaseEnvCfg):
         self.events.add_base_mass = None
 
 
+@configclass
+class PFBaseIMUEnvCfg(PFIMUEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.robot = PONGBOT_R2_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot.init_state.joint_pos = {
+            ".*HR_JOINT": 0.0,
+            ".*HP_JOINT": 0.8,
+            ".*KN_JOINT": -1.5,
+        }
+
+        self.events.add_base_mass.params["asset_cfg"].body_names = "BODY"
+        self.events.add_base_mass.params["mass_distribution_params"] = (-1.0, 2.0)
+        self.terminations.base_contact.params["sensor_cfg"].body_names = "BODY"
+        self.viewer.origin_type = "env"
+
+
+@configclass
+class PFBaseIMUEnvCfg_PLAY(PFBaseIMUEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.num_envs = 32
+        self.observations.policy.enable_corruption = False
+        self.events.push_robot = None
+        self.events.add_base_mass = None
+
+
 ############################
 # Pointfoot Blind Flat Environment
 ############################
@@ -98,6 +128,26 @@ class PFBlindFlatEnvCfg_PLAY(PFBaseEnvCfg_PLAY):
         self.observations.policy.heights = None
         self.observations.critic.heights = None
 
+        self.curriculum.terrain_levels = None
+
+
+@configclass
+class PFBlindFlatIMUEnvCfg(PFBaseIMUEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.height_scanner = None
+        self.observations.critic.heights = None
+        self.curriculum.terrain_levels = None
+
+
+@configclass
+class PFBlindFlatIMUEnvCfg_PLAY(PFBaseIMUEnvCfg_PLAY):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.height_scanner = None
+        self.observations.critic.heights = None
         self.curriculum.terrain_levels = None
 
 
@@ -250,3 +300,5 @@ class PFStairEnvCfgv1_PLAY(PFBaseEnvCfg_PLAY):
         self.scene.terrain.terrain_type = "generator"
         self.scene.terrain.max_init_terrain_level = None
         self.scene.terrain.terrain_generator = STAIRS_TERRAINS_PLAY_CFG.replace(difficulty_range=(0.5, 0.5))
+
+
