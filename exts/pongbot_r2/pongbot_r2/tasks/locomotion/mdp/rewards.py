@@ -85,7 +85,67 @@ def _check_reward_finite(
         f"stats={payload['reward_stats']}",
         flush=True,
     )
+    if os.environ.get("PONGBOT_PLAY_IGNORE_REWARD_NAN", "0") == "1":
+        print(
+            f"[REWARD_NAN_DEBUG] Ignoring invalid reward term '{reward_name}' during play and replacing NaN/Inf with 0.0.",
+            flush=True,
+        )
+        return torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
     raise RuntimeError(f"Reward term '{reward_name}' contains NaN/Inf")
+
+
+def _maybe_log_swing_height_debug(
+    env: ManagerBasedRLEnv,
+    feet_positions: torch.Tensor,
+    ray_hits_w: torch.Tensor,
+    nearest_hit_idx: torch.Tensor,
+    nearest_terrain_z: torch.Tensor,
+    forward_terrain_z: torch.Tensor,
+    reference_terrain_z: torch.Tensor,
+    feet_height: torch.Tensor,
+    swing_height_target: torch.Tensor,
+    swing_mask: torch.Tensor,
+    step_rise: torch.Tensor,
+    log_interval: int = 1,
+) -> None:
+    """Periodically print the actual height-scanner values used by pen_swing_height_error."""
+    step = int(getattr(env, "common_step_counter", -1))
+    if step < 0 or step % log_interval != 0 or env.num_envs == 0:
+        return
+
+    env_idx = 0
+    ray_hits_env = ray_hits_w[env_idx]
+    valid_hits = torch.isfinite(ray_hits_env[:, 2])
+    nearest_idx_env = nearest_hit_idx[env_idx]
+    selected_hits = ray_hits_env[nearest_idx_env].detach().cpu()
+    valid_hit_z = ray_hits_env[valid_hits, 2]
+
+    if valid_hit_z.numel() > 0:
+        valid_hit_z_cpu = valid_hit_z.detach().cpu()
+        hit_stats = {
+            "min": round(float(valid_hit_z_cpu.min().item()), 4),
+            "max": round(float(valid_hit_z_cpu.max().item()), 4),
+            "mean": round(float(valid_hit_z_cpu.mean().item()), 4),
+        }
+    else:
+        hit_stats = {"min": None, "max": None, "mean": None}
+
+    # print(
+    #     "[SWING_HEIGHT_DEBUG]",
+    #     f"step={step}",
+    #     f"feet_xyz={feet_positions[env_idx].detach().cpu().tolist()}",
+    #     f"nearest_hit_idx={nearest_idx_env.detach().cpu().tolist()}",
+    #     f"selected_hit_xyz={selected_hits.tolist()}",
+    #     f"nearest_terrain_z={nearest_terrain_z[env_idx].detach().cpu().tolist()}",
+    #     f"forward_terrain_z={forward_terrain_z[env_idx].detach().cpu().tolist()}",
+    #     f"reference_terrain_z={reference_terrain_z[env_idx].detach().cpu().tolist()}",
+    #     f"step_rise={step_rise[env_idx].detach().cpu().tolist()}",
+    #     f"feet_height={feet_height[env_idx].detach().cpu().tolist()}",
+    #     f"swing_target={swing_height_target[env_idx].detach().cpu().tolist()}",
+    #     f"swing_mask={swing_mask[env_idx].detach().cpu().tolist()}",
+    #     f"height_scanner_z_stats={hit_stats}",
+    #     flush=True,
+    # )
 
 
 def lin_vel_error(
@@ -117,6 +177,16 @@ def ang_vel_error(
 def stay_alive(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Reward for staying alive."""
     return torch.ones(env.num_envs, device=env.device)
+
+
+def action_rate_l2_clamped(
+    env: ManagerBasedRLEnv, min_value: float = 0.0, max_value: float | None = None
+) -> torch.Tensor:
+    """Penalize the action-rate magnitude with optional output clamping."""
+    penalty = torch.sum(torch.square(env.action_manager.action - env.action_manager.prev_action), dim=1)
+    if max_value is None:
+        return torch.clamp(penalty, min=min_value)
+    return torch.clamp(penalty, min=min_value, max=max_value)
 
 def foot_landing_vel(
         env: ManagerBasedRLEnv,
@@ -398,6 +468,36 @@ def stand_still(
     )
 
 
+def stand_still_joint_deviation_l1(
+    env: ManagerBasedRLEnv,
+    lin_threshold: float = 0.05,
+    ang_threshold: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize deviation from the default joint pose only when the velocity command is near zero."""
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    commands = env.command_manager.get_command("base_velocity")
+
+    standing_mask = (
+        (torch.norm(commands[:, :2], dim=1) < lin_threshold)
+        & (torch.abs(commands[:, 2]) < ang_threshold)
+    ).float()
+
+    joint_ids = asset_cfg.joint_ids if asset_cfg.joint_ids is not None else slice(None)
+    joint_deviation = torch.abs(
+        asset.data.joint_pos[:, joint_ids] - asset.data.default_joint_pos[:, joint_ids]
+    )
+    reward = torch.sum(joint_deviation, dim=1) * standing_mask
+
+    return _check_reward_finite(
+        env,
+        "stand_still_joint_deviation_l1",
+        reward,
+        {"commands": commands, "standing_mask": standing_mask, "joint_deviation": joint_deviation},
+    )
+
+
 # def feet_regulation(
 #     env: ManagerBasedRLEnv,
 #     sensor_cfg: SceneEntityCfg,
@@ -466,6 +566,143 @@ def feet_regulation(env: ManagerBasedRLEnv,
             "feet_height": feet_height,
             "feet_vel_xy": feet_vel_xy,
             "height_scale": height_scale,
+        },
+    )
+
+
+def pen_swing_height_error(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg,
+    foot_radius: float,
+) -> torch.Tensor:
+    """Penalize insufficient swing-foot clearance using a forward-aware terrain reference."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    gait_params = env.command_manager.get_command(command_name)
+    base_velocity_cmd = env.command_manager.get_command("base_velocity")
+    clearance_margin = 0.03
+    forward_window = 0.30
+    lateral_window = 0.10
+
+    frequencies = gait_params[:, 0]
+    offsets = gait_params[:, 1]
+    durations = torch.cat(
+        [gait_params[:, 2].view(env.num_envs, 1), gait_params[:, 2].view(env.num_envs, 1)],
+        dim=1,
+    )
+    # swing_height_target = gait_params[:, 3].unsqueeze(1)
+    
+
+    gait_indices = torch.remainder(env.episode_length_buf * env.step_dt * frequencies, 1.0)
+    foot_indices = torch.remainder(
+        torch.cat(
+            [gait_indices.view(env.num_envs, 1), (gait_indices + offsets + 1.0).view(env.num_envs, 1)],
+            dim=1,
+        ),
+        1.0,
+    )
+    swing_mask = foot_indices > durations
+
+    feet_positions = asset.data.body_pos_w[:, asset_cfg.body_ids, :]
+    nearest_terrain_z = torch.zeros_like(feet_positions[..., 2])
+    forward_terrain_z = torch.zeros_like(feet_positions[..., 2])
+    reference_terrain_z = torch.zeros_like(feet_positions[..., 2])
+    if "height_scanner" in env.scene.sensors:
+        height_scanner: RayCaster = env.scene.sensors["height_scanner"]
+        ray_hits_w = height_scanner.data.ray_hits_w
+        valid_hits = torch.isfinite(ray_hits_w[..., 2])
+        if torch.any(valid_hits):
+            dist_sq = torch.sum(
+                torch.square(feet_positions[..., :2].unsqueeze(2) - ray_hits_w[..., :2].unsqueeze(1)),
+                dim=-1,
+            )
+            dist_sq = torch.where(valid_hits.unsqueeze(1), dist_sq, torch.inf)
+            nearest_hit_idx = torch.argmin(dist_sq, dim=2)
+            nearest_terrain_z = torch.gather(ray_hits_w[..., 2], 1, nearest_hit_idx)
+            nearest_terrain_z = torch.where(
+                torch.isfinite(nearest_terrain_z), nearest_terrain_z, torch.zeros_like(nearest_terrain_z)
+            )
+
+            cmd_xy = base_velocity_cmd[:, :2]
+            cmd_xy_norm = torch.norm(cmd_xy, dim=1, keepdim=True)
+            cmd_direction = cmd_xy / torch.clamp(cmd_xy_norm, min=1.0e-6)
+            body_forward = math_utils.quat_apply_yaw(
+                asset.data.root_quat_w, torch.tensor([1.0, 0.0, 0.0], device=env.device).repeat(env.num_envs, 1)
+            )[:, :2]
+            body_forward = body_forward / torch.clamp(torch.norm(body_forward, dim=1, keepdim=True), min=1.0e-6)
+            use_body_forward = cmd_xy_norm.squeeze(-1) <= 0.1
+            move_direction = torch.where(use_body_forward.unsqueeze(-1), body_forward, cmd_direction)
+            lateral_direction = torch.stack([-move_direction[:, 1], move_direction[:, 0]], dim=1)
+
+            hit_delta_xy = ray_hits_w[..., :2].unsqueeze(1) - feet_positions[..., :2].unsqueeze(2)
+            forward_dist = torch.sum(hit_delta_xy * move_direction.unsqueeze(1).unsqueeze(1), dim=-1)
+            lateral_dist = torch.abs(torch.sum(hit_delta_xy * lateral_direction.unsqueeze(1).unsqueeze(1), dim=-1))
+            forward_candidates = (
+                valid_hits.unsqueeze(1)
+                & (forward_dist > 0.0)
+                & (forward_dist <= forward_window)
+                & (lateral_dist <= lateral_window)
+            )
+            forward_hit_z = ray_hits_w[..., 2].unsqueeze(1).expand(-1, feet_positions.shape[1], -1)
+            forward_hit_z = torch.where(forward_candidates, forward_hit_z, torch.full_like(forward_hit_z, -torch.inf))
+            forward_terrain_z = torch.max(forward_hit_z, dim=2).values
+            forward_terrain_z = torch.where(
+                torch.isfinite(forward_terrain_z), forward_terrain_z, nearest_terrain_z
+            )
+            reference_terrain_z = torch.maximum(nearest_terrain_z, forward_terrain_z)
+            debug_swing_mask = swing_mask
+            debug_step_rise = torch.clamp(reference_terrain_z - nearest_terrain_z, min=0.0)
+            debug_swing_height_target = gait_params[:, 3:4].expand(-1, feet_positions.shape[1]) + clearance_margin + debug_step_rise
+            if debug_swing_mask.shape[1] != feet_positions.shape[1]:
+                repeat_factor = (feet_positions.shape[1] + debug_swing_mask.shape[1] - 1) // debug_swing_mask.shape[1]
+                debug_swing_mask = debug_swing_mask.repeat(1, repeat_factor)[:, : feet_positions.shape[1]]
+                debug_swing_height_target = debug_swing_height_target.repeat(1, repeat_factor)[:, : feet_positions.shape[1]]
+                debug_step_rise = debug_step_rise.repeat(1, repeat_factor)[:, : feet_positions.shape[1]]
+            _maybe_log_swing_height_debug(
+                env,
+                feet_positions=feet_positions,
+                ray_hits_w=ray_hits_w,
+                nearest_hit_idx=nearest_hit_idx,
+                nearest_terrain_z=nearest_terrain_z,
+                forward_terrain_z=forward_terrain_z,
+                reference_terrain_z=reference_terrain_z,
+                feet_height=torch.clamp(feet_positions[..., 2] - nearest_terrain_z - foot_radius, min=0.0),
+                swing_height_target=debug_swing_height_target,
+                swing_mask=debug_swing_mask,
+                step_rise=debug_step_rise,
+            )
+
+    if not torch.any(reference_terrain_z):
+        reference_terrain_z = nearest_terrain_z
+    feet_height = torch.clamp(feet_positions[..., 2] - nearest_terrain_z - foot_radius, min=0.0)
+    step_rise = torch.clamp(reference_terrain_z - nearest_terrain_z, min=0.0)
+    swing_height_target = gait_params[:, 3:4].expand(-1, feet_height.shape[1]) + clearance_margin + step_rise
+
+    if swing_mask.shape[1] != feet_height.shape[1]:
+        repeat_factor = (feet_height.shape[1] + swing_mask.shape[1] - 1) // swing_mask.shape[1]
+        swing_mask = swing_mask.repeat(1, repeat_factor)[:, : feet_height.shape[1]]
+        swing_height_target = swing_height_target.repeat(1, repeat_factor)[:, : feet_height.shape[1]]
+        step_rise = step_rise.repeat(1, repeat_factor)[:, : feet_height.shape[1]]
+
+    clearance_error = torch.clamp(swing_height_target - feet_height, min=0.0)
+    height_error = torch.square(clearance_error)
+    reward = torch.sum(torch.where(swing_mask, height_error, torch.zeros_like(height_error)), dim=1)
+    reward *= torch.norm(base_velocity_cmd[:, :2], dim=1) > 0.1
+
+    return _check_reward_finite(
+        env,
+        "pen_swing_height_error",
+        reward,
+        {
+            "gait_params": gait_params,
+            "base_velocity_cmd": base_velocity_cmd,
+            "swing_mask": swing_mask,
+            "feet_height": feet_height,
+            "swing_height_target": swing_height_target,
+            "nearest_terrain_z": nearest_terrain_z,
+            "forward_terrain_z": forward_terrain_z,
+            "reference_terrain_z": reference_terrain_z,
+            "step_rise": step_rise,
         },
     )
 
@@ -583,6 +820,8 @@ class GaitReward(ManagerTermBase):
         """
 
         gait_params = env.command_manager.get_command(self.command_name)
+        base_velocity_cmd = env.command_manager.get_command("base_velocity")
+        standing_cmd = torch.norm(base_velocity_cmd[:, :2], dim=1) <= 0.1
 
         # Update contact targets
         desired_contact_states = self.compute_contact_targets(gait_params)
@@ -590,6 +829,9 @@ class GaitReward(ManagerTermBase):
         # Force-based reward
         foot_forces = torch.norm(self.contact_sensor.data.net_forces_w[:, self.sensor_cfg.body_ids], dim=-1)
         desired_contact_states = self._match_contact_shape(desired_contact_states, foot_forces.shape[1])
+        desired_contact_states = torch.where(
+            standing_cmd.unsqueeze(1), torch.ones_like(desired_contact_states), desired_contact_states
+        )
         force_reward = self._compute_force_reward(foot_forces, desired_contact_states)
 
         # Velocity-based reward

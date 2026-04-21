@@ -32,8 +32,8 @@ def robot_feet_contact_force(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg)
     """contact force of the robot feet"""
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    contact_force_tensor = contact_sensor.data.net_forces_w_history.to(device)
-    return contact_force_tensor.view(contact_force_tensor.shape[0], -1)
+    contact_force_tensor = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids].to(device)
+    return contact_force_tensor.reshape(contact_force_tensor.shape[0], -1)
 
 
 def robot_mass(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
@@ -114,6 +114,24 @@ def robot_contact_force(env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg) -> tor
     return body_contact_force.reshape(body_contact_force.shape[0], -1)
 
 
+def safe_height_scan(
+    env: ManagerBasedEnv,
+    sensor_cfg: SceneEntityCfg,
+    offset: float = 0.55,
+    min_height: float = -1.0,
+    max_height: float = 1.0,
+) -> torch.Tensor:
+    """Height scan with explicit sanitization for NaN/Inf and extreme values."""
+    sensor: RayCaster = env.scene.sensors[sensor_cfg.name]
+
+    sensor_z = sensor.data.pos_w[:, 2].unsqueeze(1)
+    hit_z = sensor.data.ray_hits_w[..., 2]
+    heights = sensor_z - hit_z - offset
+    heights = torch.nan_to_num(heights, nan=0.0, posinf=max_height, neginf=min_height)
+    heights = torch.clamp(heights, min=min_height, max=max_height)
+    return heights
+
+
 def get_gait_phase(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Get the current gait phase as observation.
 
@@ -148,13 +166,6 @@ def get_gait_command(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
                      Shape: (num_envs, 3).
     """
     return env.command_manager.get_command(command_name)
-
-
-def robot_base_pose(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
-    """pose of the robot base"""
-    asset: Articulation = env.scene[asset_cfg.name]
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    return asset.data.root_pos_w.to(device)
 
 def feet_lin_vel(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """Root linear velocity in the asset's root frame."""

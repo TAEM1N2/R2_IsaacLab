@@ -148,25 +148,63 @@ class JoystickController(BaseController):
         super().__init__(cfg)
         if pygame is None:
             raise ImportError("pygame is not installed. Cannot use 'joy' mode.")
-        
+
         pygame.init()
         pygame.joystick.init()
-        
-        if pygame.joystick.get_count() == 0:
-            raise ConnectionError("No joystick found. Please connect a joystick.")
-        
-        self.joystick = pygame.joystick.Joystick(0)
-        self.joystick.init()
-        print(f"Joystick '{self.joystick.get_name()}' initialized.")
+
+        self.joystick = None
+        self.connected = False
         self.deadzone = 0.1
+        self._last_discovery_attempt = 0.0
+        self._discovery_interval_s = 0.5
+
+    def _set_zero_commands(self):
+        self._commands.zero_()
+
+    def _disconnect_joystick(self):
+        self.joystick = None
+        if self.connected:
+            print("Joystick disconnected.")
+        self.connected = False
+        self._set_zero_commands()
+
+    def _try_connect_joystick(self):
+        now = time.time()
+        if now - self._last_discovery_attempt < self._discovery_interval_s:
+            return
+        self._last_discovery_attempt = now
+
+        pygame.joystick.quit()
+        pygame.joystick.init()
+        if pygame.joystick.get_count() == 0:
+            self._disconnect_joystick()
+            return
+
+        joystick = pygame.joystick.Joystick(0)
+        joystick.init()
+        self.joystick = joystick
+        self.connected = True
+        print(f"Joystick '{self.joystick.get_name()}' initialized.")
 
     def _listener_loop(self):
         while not self._stop_event.is_set():
-            pygame.event.get()
+            pygame.event.pump()
 
-            vx_axis = -self.joystick.get_axis(1)
-            vy_axis = -self.joystick.get_axis(0)
-            vyaw_axis = self.joystick.get_axis(3)
+            if self.joystick is None or not self.connected:
+                self._try_connect_joystick()
+                if self.joystick is None or not self.connected:
+                    self._set_zero_commands()
+                    time.sleep(0.05)
+                    continue
+
+            try:
+                vx_axis = -self.joystick.get_axis(1)
+                vy_axis = -self.joystick.get_axis(0)
+                vyaw_axis = -self.joystick.get_axis(3)
+            except pygame.error:
+                self._disconnect_joystick()
+                time.sleep(0.05)
+                continue
 
             vx = vx_axis if abs(vx_axis) > self.deadzone else 0.0
             vy = vy_axis if abs(vy_axis) > self.deadzone else 0.0
@@ -179,5 +217,6 @@ class JoystickController(BaseController):
             time.sleep(0.02)
 
     def stop(self):
+        self._disconnect_joystick()
         super().stop()
         pygame.quit()

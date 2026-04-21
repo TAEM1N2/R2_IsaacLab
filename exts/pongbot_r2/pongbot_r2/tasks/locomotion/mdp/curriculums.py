@@ -108,7 +108,12 @@ def ramp_reward_terms_by_weight(
         env._reward_term_base_weights = {}
 
     for term_name in term_names:
-        term_cfg = env.reward_manager.get_term_cfg(term_name)
+        try:
+            term_cfg = env.reward_manager.get_term_cfg(term_name)
+        except ValueError:
+            # Allow play / config drift to continue even if an old reward term name
+            # remains in the curriculum list.
+            continue
 
         if term_name not in env._reward_term_base_weights:
             env._reward_term_base_weights[term_name] = term_cfg.weight

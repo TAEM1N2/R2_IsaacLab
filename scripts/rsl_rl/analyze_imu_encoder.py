@@ -90,18 +90,26 @@ def plot_groups(
         axes = np.asarray([axes])
 
     component_labels = ["x", "y", "z"]
+    y_units = {
+        "lin_vel": "[m/s]",
+        "ang_vel": "[rad/s]",
+        "projected_gravity": "",
+    }
     for row_idx, (group_name, (est, gt)) in enumerate(groups.items()):
         for col_idx in range(3):
             ax = axes[row_idx, col_idx]
             ax.plot(steps, gt[:, col_idx], label="gt", linewidth=2)
             ax.plot(steps, est[:, col_idx], label="est", linewidth=1.5, alpha=0.85)
             ax.set_title(f"{group_name}.{component_labels[col_idx]}")
+            ax.set_ylabel(y_units.get(group_name, ""))
+            if group_name == "projected_gravity" and component_labels[col_idx] == "z":
+                ax.set_ylim(-1.2, -0.8)
             ax.grid(True, alpha=0.3)
             if row_idx == 0 and col_idx == 0:
                 ax.legend()
-    axes[-1, 0].set_xlabel("step")
-    axes[-1, 1].set_xlabel("step")
-    axes[-1, 2].set_xlabel("step")
+    axes[-1, 0].set_xlabel("step [count]")
+    axes[-1, 1].set_xlabel("step [count]")
+    axes[-1, 2].set_xlabel("step [count]")
     fig.suptitle(title)
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
@@ -113,8 +121,8 @@ def plot_norms(steps: np.ndarray, norms: dict[str, np.ndarray], output_path: Pat
     for name, values in norms.items():
         ax.plot(steps, values, label=name, linewidth=2)
     ax.set_title(title)
-    ax.set_xlabel("step")
-    ax.set_ylabel("l2 error")
+    ax.set_xlabel("step [count]")
+    ax.set_ylabel("l2 error [mixed units]")
     ax.grid(True, alpha=0.3)
     ax.legend()
     fig.tight_layout()

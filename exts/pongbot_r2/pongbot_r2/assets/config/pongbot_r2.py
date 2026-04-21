@@ -10,15 +10,15 @@ from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.actuators import DelayedPDActuatorCfg
 
 
-USD_PATH = Path(__file__).resolve().parents[1] / "usd" / "pongbot_r2" / "R2_usd.usd"
-
+# USD_PATH = Path(__file__).resolve().parents[1] / "usd" / "pongbot_r2" / "kth" / "pongbot_r2_v2.usd"
+USD_PATH = Path(__file__).resolve().parents[1] / "usd" / "pongbot_r2" / "ktm" / "PONGBOT_R2_V2.usd"
 
 RMD_TOR_CTRL = DelayedPDActuatorCfg(
     joint_names_expr = [".*HR_JOINT", ".*HP_JOINT", ".*KN_JOINT"],
     effort_limit={
         ".*HR_JOINT": 120.0,
         ".*HP_JOINT": 120.0,
-        ".*KN_JOINT": 150.0,
+        ".*KN_JOINT": 320.0,
     },
     velocity_limit=19.,
     stiffness={".*": 150.0},
@@ -49,11 +49,11 @@ PONGBOT_R2_CFG = ArticulationCfg(
         collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.02, rest_offset=0.0),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.6),
+        pos=(0.0, 0.0, 0.8),
         joint_pos={
             ".*HR_JOINT": 0.0,   
-            ".*HP_JOINT": 0.8,    
-            ".*KN_JOINT": -1.5, 
+            ".*HP_JOINT": 0.64, #0.8,    
+            ".*KN_JOINT": -1.25, #-1.5, 
         },
     ),
     actuators={"legs": RMD_TOR_CTRL}, # REALNET_PD_CTRL

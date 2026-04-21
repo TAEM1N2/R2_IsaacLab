@@ -65,10 +65,10 @@ BLIND_ROUGH_TERRAINS_PLAY_CFG = TerrainGeneratorCfg(
         ),
 
         "hf_pyramid_slope": HfPyramidSlopedTerrainCfg(
-            proportion=0.1, slope_range=(0.0, 0.4), platform_width=2.0, border_width=0.25
+            proportion=0.1, slope_range=(0.0, 0.2), platform_width=2.0, border_width=0.25
         ),
         "hf_pyramid_slope_inv": HfInvertedPyramidSlopedTerrainCfg(
-            proportion=0.1, slope_range=(0.0, 0.4), platform_width=2.0, border_width=0.25
+            proportion=0.1, slope_range=(0.0, 0.2), platform_width=2.0, border_width=0.25
         ),
     },
     curriculum=False,

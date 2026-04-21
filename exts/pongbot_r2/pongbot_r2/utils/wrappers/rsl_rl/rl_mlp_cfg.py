@@ -18,6 +18,12 @@ class RslRlPpoAlgorithmMlpCfg(RslRlPpoAlgorithmCfg):
 
     obs_history_len: int = 1
     encoder_warmup_iters: int = 0
+    bootstrap_mode: Literal["warmup", "adaptive"] = "adaptive"
+    bootstrap_min_iters: int = 0
+    bootstrap_loss_threshold: float = 0.15
+    bootstrap_loss_hysteresis: float = 0.01
+    bootstrap_ema_alpha: float = 0.1
+    est_learning_rate: float = 1.0e-4
 
 
 @configclass

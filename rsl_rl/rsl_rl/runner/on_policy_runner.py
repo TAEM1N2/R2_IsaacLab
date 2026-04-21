@@ -75,10 +75,19 @@ class OnPolicyRunner:
         ).to(self.device)
 
         actor_critic_class = ActorCritic
+        #obs_history
+        # actor_critic: ActorCritic = actor_critic_class(
+        #     self.num_obs + encoder.num_output_dim + self.num_commands,
+        #     num_critic_obs,
+        #     self.env.num_actions,
+        #     **self.policy_cfg,
+        # ).to(self.device)
+
         actor_critic: ActorCritic = actor_critic_class(
             self.num_obs
             + encoder.num_output_dim
-            + self.num_commands,
+            + self.num_commands
+            + self.obs_history_dim,
             num_critic_obs,
             self.env.num_actions,
             **self.policy_cfg,
@@ -132,6 +141,11 @@ class OnPolicyRunner:
         # _, _ = self.env.reset()
         _ = self.env.reset()
         self._print_actuator_gains_once()
+        self._print_spawn_debug_once()
+
+    @staticmethod
+    def _flatten_obs_history(obs_history: torch.Tensor) -> torch.Tensor:
+        return obs_history.flatten(start_dim=1) if obs_history.dim() > 2 else obs_history
 
     @staticmethod
     def _tensor_stats(tensor: torch.Tensor) -> dict:
@@ -192,6 +206,74 @@ class OnPolicyRunner:
             print(f"[ACTUATOR_DEBUG] {actuator_name} kp {kp}", flush=True)
             print(f"[ACTUATOR_DEBUG] {actuator_name} kd {kd}", flush=True)
 
+    def _print_spawn_debug_once(self) -> None:
+        """Print spawn/terrain height debug values for env 0 once at startup."""
+        base_env = getattr(self.env, "unwrapped", None)
+        if base_env is None or not hasattr(base_env, "scene"):
+            return
+
+        scene = base_env.scene
+        try:
+            asset = scene["robot"]
+        except KeyError:
+            return
+
+        env_idx = 0
+        try:
+            env_origin_z = float(scene.env_origins[env_idx, 2].item())
+        except Exception:
+            env_origin_z = float("nan")
+
+        try:
+            root_world_z = float(asset.data.root_pos_w[env_idx, 2].item())
+        except Exception:
+            root_world_z = float("nan")
+
+        try:
+            foot_ids = asset.find_bodies(".*TIP")[0]
+        except Exception:
+            foot_ids = []
+
+        if len(foot_ids) == 0:
+            print(
+                "[SPAWN_DEBUG]",
+                f"env={env_idx}",
+                f"env_origin_z={env_origin_z:.4f}",
+                f"root_world_z={root_world_z:.4f}",
+                "foot_world_z=[]",
+                "terrain_z=[]",
+                flush=True,
+            )
+            return
+
+        foot_positions = asset.data.body_pos_w[env_idx, foot_ids, :]
+        foot_world_z = [round(float(v), 4) for v in foot_positions[:, 2].detach().cpu().tolist()]
+
+        terrain_z_values = [float("nan")] * len(foot_ids)
+        if "height_scanner" in scene.sensors:
+            height_scanner = scene.sensors["height_scanner"]
+            ray_hits_w = height_scanner.data.ray_hits_w[env_idx]
+            valid_hits = torch.isfinite(ray_hits_w[:, 2])
+            if torch.any(valid_hits):
+                foot_xy = foot_positions[:, :2]
+                ray_xy = ray_hits_w[:, :2]
+                dist_sq = torch.sum(torch.square(foot_xy.unsqueeze(1) - ray_xy.unsqueeze(0)), dim=-1)
+                dist_sq = torch.where(valid_hits.unsqueeze(0), dist_sq, torch.inf)
+                nearest_hit_idx = torch.argmin(dist_sq, dim=1)
+                terrain_z = ray_hits_w[nearest_hit_idx, 2]
+                terrain_z = torch.where(torch.isfinite(terrain_z), terrain_z, torch.full_like(terrain_z, torch.nan))
+                terrain_z_values = [round(float(v), 4) for v in terrain_z.detach().cpu().tolist()]
+
+        print(
+            "[SPAWN_DEBUG]",
+            f"env={env_idx}",
+            f"env_origin_z={env_origin_z:.4f}",
+            f"root_world_z={root_world_z:.4f}",
+            f"foot_world_z={foot_world_z}",
+            f"terrain_z={terrain_z_values}",
+            flush=True,
+        )
+
     def _print_action_debug(self, step_idx: int) -> None:
         """Print action processing and actuator outputs for env 0."""
         def _round_tensor(values: torch.Tensor) -> list[float]:
@@ -250,8 +332,13 @@ class OnPolicyRunner:
                 self.env.episode_length_buf, high=int(self.env.max_episode_length)
             )
         obs, extras = self.env.get_observations()
-        obs_history = extras["observations"].get("obsHistory")
-        obs_history = obs_history.flatten(start_dim=1)
+        obs_history_raw = extras["observations"].get("obsHistory")
+        assert obs_history_raw is not None, "obsHistory not found in observations"
+        if obs_history_raw.dim() >= 3 and obs_history_raw.shape[1] != self.obs_history_len:
+            raise ValueError(
+                f"obsHistory length mismatch: env={obs_history_raw.shape[1]} cfg={self.obs_history_len}"
+            )
+        obs_history = self._flatten_obs_history(obs_history_raw)
         critic_obs = extras["observations"].get("critic")
         commands = extras["observations"].get("commands") 
 
@@ -290,19 +377,19 @@ class OnPolicyRunner:
                     self._check_tensor_finite("commands_pre_act", commands, debug_context)
                     self._check_tensor_finite("critic_obs_pre_act", critic_obs, debug_context)
                     actions = self.alg.act(obs, obs_history, commands, critic_obs)
-                    # add critic_obs_buf to step returns, make sure it updates in every for loop
                     (obs, rewards, dones, infos) = self.env.step(actions)
                     if self.env.num_envs == 1:
                         self._print_action_debug(step_idx=i)
 
                     critic_obs = infos["observations"]["critic"]
-                    obs_history = infos["observations"]["obsHistory"].flatten(start_dim=1)
                     commands = infos["observations"]["commands"]
+                    next_obs_history = infos["observations"].get("obsHistory")
+                    assert next_obs_history is not None, "obsHistory not found in step observations"
+                    done_env_ids = (dones > 0).nonzero(as_tuple=False).flatten()
 
-                    # critic_obs = obs
                     obs, obs_history, commands, critic_obs, rewards, dones = (
                         obs.to(self.device),
-                        obs_history.to(self.device),
+                        self._flatten_obs_history(next_obs_history).to(self.device),
                         commands.to(self.device),
                         critic_obs.to(self.device), # critic_obs.to(self.device),
                         rewards.to(self.device),
@@ -348,12 +435,67 @@ class OnPolicyRunner:
                 else:
                     self.alg.compute_returns(critic_obs_)
 
-            (
-                mean_value_loss,
-                mean_extra_loss,
-                mean_surrogate_loss,
-                mean_kl,
-            ) = self.alg.update()
+            update_result = self.alg.update()
+            if len(update_result) == 26:
+                (
+                    mean_value_loss,
+                    mean_extra_loss,
+                    mean_lin_vel_loss,
+                    mean_ang_vel_loss,
+                    mean_ang_vel_x_loss,
+                    mean_ang_vel_y_loss,
+                    mean_ang_vel_z_loss,
+                    mean_ang_vel_x_smooth_l1,
+                    bootstrap_metric,
+                    bootstrap_metric_ang_vel,
+                    ang_vel_target_mean_x,
+                    ang_vel_target_mean_y,
+                    ang_vel_target_mean_z,
+                    ang_vel_target_std_x,
+                    ang_vel_target_std_y,
+                    ang_vel_target_std_z,
+                    ang_vel_target_max_x,
+                    ang_vel_target_max_y,
+                    ang_vel_target_max_z,
+                    ang_vel_target_rmse_x,
+                    ang_vel_target_rmse_y,
+                    ang_vel_target_rmse_z,
+                    mean_proj_grav_loss,
+                    mean_surrogate_loss,
+                    mean_kl,
+                    mean_explained_variance,
+                ) = update_result
+            elif len(update_result) == 5:
+                (
+                    mean_value_loss,
+                    mean_extra_loss,
+                    mean_surrogate_loss,
+                    mean_kl,
+                    mean_explained_variance,
+                ) = update_result
+                mean_lin_vel_loss = 0.0
+                mean_ang_vel_loss = 0.0
+                mean_ang_vel_x_loss = 0.0
+                mean_ang_vel_y_loss = 0.0
+                mean_ang_vel_z_loss = 0.0
+                mean_ang_vel_x_smooth_l1 = 0.0
+                bootstrap_metric = None
+                bootstrap_metric_ang_vel = None
+                ang_vel_target_mean_x = 0.0
+                ang_vel_target_mean_y = 0.0
+                ang_vel_target_mean_z = 0.0
+                ang_vel_target_std_x = 0.0
+                ang_vel_target_std_y = 0.0
+                ang_vel_target_std_z = 0.0
+                ang_vel_target_max_x = 0.0
+                ang_vel_target_max_y = 0.0
+                ang_vel_target_max_z = 0.0
+                ang_vel_target_rmse_x = 0.0
+                ang_vel_target_rmse_y = 0.0
+                ang_vel_target_rmse_z = 0.0
+                mean_proj_grav_loss = 0.0
+            else:
+                raise ValueError(f"Unexpected update() result length: {len(update_result)}")
             stop = time.time()
             learn_time = stop - start
 
@@ -401,12 +543,49 @@ class OnPolicyRunner:
             "Loss/value_function", locs["mean_value_loss"], locs["it"]
         )
         self.writer.add_scalar("Loss/encoder", locs["mean_extra_loss"], locs["it"])
+        self.writer.add_scalar("Loss/encoder_lin_vel", locs["mean_lin_vel_loss"], locs["it"])
+        self.writer.add_scalar("Loss/encoder_ang_vel", locs["mean_ang_vel_loss"], locs["it"])
+        self.writer.add_scalar("Loss/encoder_ang_vel_x", locs["mean_ang_vel_x_loss"], locs["it"])
+        self.writer.add_scalar("Loss/encoder_ang_vel_y", locs["mean_ang_vel_y_loss"], locs["it"])
+        self.writer.add_scalar("Loss/encoder_ang_vel_z", locs["mean_ang_vel_z_loss"], locs["it"])
+        self.writer.add_scalar("Loss/encoder_proj_grav", locs["mean_proj_grav_loss"], locs["it"])
+        if locs["bootstrap_metric"] is not None:
+            self.writer.add_scalar("Bootstrap/metric_normalized_mse", locs["bootstrap_metric"], locs["it"])
+        if locs["bootstrap_metric_ang_vel"] is not None:
+            self.writer.add_scalar(
+                "Bootstrap/metric_ang_vel_normalized_mse", locs["bootstrap_metric_ang_vel"], locs["it"]
+            )
+        self.writer.add_scalar("Target/ang_vel_x_mean", locs["ang_vel_target_mean_x"], locs["it"])
+        self.writer.add_scalar("Target/ang_vel_y_mean", locs["ang_vel_target_mean_y"], locs["it"])
+        self.writer.add_scalar("Target/ang_vel_z_mean", locs["ang_vel_target_mean_z"], locs["it"])
+        self.writer.add_scalar("Target/ang_vel_x_std", locs["ang_vel_target_std_x"], locs["it"])
+        self.writer.add_scalar("Target/ang_vel_y_std", locs["ang_vel_target_std_y"], locs["it"])
+        self.writer.add_scalar("Target/ang_vel_z_std", locs["ang_vel_target_std_z"], locs["it"])
+        self.writer.add_scalar("Target/ang_vel_x_max", locs["ang_vel_target_max_x"], locs["it"])
+        self.writer.add_scalar("Target/ang_vel_y_max", locs["ang_vel_target_max_y"], locs["it"])
+        self.writer.add_scalar("Target/ang_vel_z_max", locs["ang_vel_target_max_z"], locs["it"])
+        self.writer.add_scalar("Target/ang_vel_x_rmse", locs["ang_vel_target_rmse_x"], locs["it"])
+        self.writer.add_scalar("Target/ang_vel_y_rmse", locs["ang_vel_target_rmse_y"], locs["it"])
+        self.writer.add_scalar("Target/ang_vel_z_rmse", locs["ang_vel_target_rmse_z"], locs["it"])
         self.writer.add_scalar(
             "Loss/surrogate", locs["mean_surrogate_loss"], locs["it"]
         )
         self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
+        if hasattr(self.alg, "get_bootstrap_state"):
+            bootstrap_state = self.alg.get_bootstrap_state()
+            if bootstrap_state.get("bootstrap_metric") is not None:
+                self.writer.add_scalar(
+                    "Bootstrap/metric", bootstrap_state["bootstrap_metric"], locs["it"]
+                )
+            self.writer.add_scalar(
+                "Bootstrap/use_raw_imu", float(bootstrap_state["use_raw_imu"]), locs["it"]
+            )
+            self.writer.add_scalar(
+                "Bootstrap/encoder_active", float(bootstrap_state.get("bootstrap_encoder_active", False)), locs["it"]
+            )
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
         self.writer.add_scalar("Policy/mean_kl", locs["mean_kl"], locs["it"])
+        self.writer.add_scalar("Value/explained_variance", locs["mean_explained_variance"], locs["it"])
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
         self.writer.add_scalar(
             "Perf/collection time", locs["collection_time"], locs["it"]
@@ -438,30 +617,85 @@ class OnPolicyRunner:
         str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
 
         if len(locs["rewbuffer"]) > 0:
+            bootstrap_string = ""
+            if hasattr(self.alg, "get_bootstrap_state"):
+                bootstrap_state = self.alg.get_bootstrap_state()
+                metric_value = bootstrap_state.get("bootstrap_metric")
+                metric_string = f"{metric_value:.6f}" if metric_value is not None else "n/a"
+                bootstrap_string = (
+                    f"""{'Bootstrap mode:':>{pad}} {bootstrap_state['mode']}\n"""
+                    f"""{'Use raw imu:':>{pad}} {bootstrap_state['use_raw_imu']}\n"""
+                    f"""{'Encoder active:':>{pad}} {bootstrap_state.get('bootstrap_encoder_active', False)}\n"""
+                    f"""{'Bootstrap metric:':>{pad}} {metric_string}\n"""
+                )
             log_string = (
                 f"""{'#' * width}\n"""
                 f"""{str.center(width, ' ')}\n\n"""
                 f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                 f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
+                f"""{'Explained variance:':>{pad}} {locs['mean_explained_variance']:.4f}\n"""
                 f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                f"""{'Mean KL divergence:':>{pad}} {locs['mean_kl']:.6f}\n"""
                 f"""{'Mean action noise std:':>{pad}} {mean_std.item():.4f}\n"""
                 f"""{'Learning rate:':>{pad}} {self.alg.learning_rate:.4f}\n"""
+                f"""{'Encoder loss:':>{pad}} {locs['mean_extra_loss']:.4f}\n"""
+                f"""{'Encoder lin vel loss:':>{pad}} {locs['mean_lin_vel_loss']:.4f}\n"""
+                f"""{'Encoder ang vel loss:':>{pad}} {locs['mean_ang_vel_loss']:.4f}\n"""
+                f"""{'Encoder ang vel x loss:':>{pad}} {locs['mean_ang_vel_x_loss']:.4f}\n"""
+                f"""{'Encoder ang vel y loss:':>{pad}} {locs['mean_ang_vel_y_loss']:.4f}\n"""
+                f"""{'Encoder ang vel z loss:':>{pad}} {locs['mean_ang_vel_z_loss']:.4f}\n"""
+                # f"""{'Encoder ang vel x smooth l1:':>{pad}} {locs['mean_ang_vel_x_smooth_l1']:.4f}\n"""
+                f"""{'Encoder proj grav loss:':>{pad}} {locs['mean_proj_grav_loss']:.4f}\n"""
+                # f"""{'Bootstrap normalized mse:':>{pad}} {locs['bootstrap_metric']:.4f}\n"""
+                # f"""{'Bootstrap ang vel norm mse:':>{pad}} {locs['bootstrap_metric_ang_vel']:.4f}\n"""
+                # f"""{'Target ang vel x mean/std/max/rmse:':>{pad}} {locs['ang_vel_target_mean_x']:.4f} / {locs['ang_vel_target_std_x']:.4f} / {locs['ang_vel_target_max_x']:.4f} / {locs['ang_vel_target_rmse_x']:.4f}\n"""
+                # f"""{'Target ang vel y mean/std/max/rmse:':>{pad}} {locs['ang_vel_target_mean_y']:.4f} / {locs['ang_vel_target_std_y']:.4f} / {locs['ang_vel_target_max_y']:.4f} / {locs['ang_vel_target_rmse_y']:.4f}\n"""
+                # f"""{'Target ang vel z mean/std/max/rmse:':>{pad}} {locs['ang_vel_target_mean_z']:.4f} / {locs['ang_vel_target_std_z']:.4f} / {locs['ang_vel_target_max_z']:.4f} / {locs['ang_vel_target_rmse_z']:.4f}\n"""
                 f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
                 f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
             )
+            
+            # log_string += bootstrap_string
             #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
             #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
         else:
+            bootstrap_string = ""
+            if hasattr(self.alg, "get_bootstrap_state"):
+                bootstrap_state = self.alg.get_bootstrap_state()
+                metric_value = bootstrap_state.get("bootstrap_metric")
+                metric_string = f"{metric_value:.6f}" if metric_value is not None else "n/a"
+                bootstrap_string = (
+                    f"""{'Bootstrap mode:':>{pad}} {bootstrap_state['mode']}\n"""
+                    f"""{'Use raw imu:':>{pad}} {bootstrap_state['use_raw_imu']}\n"""
+                    f"""{'Encoder active:':>{pad}} {bootstrap_state.get('bootstrap_encoder_active', False)}\n"""
+                    f"""{'Bootstrap metric:':>{pad}} {metric_string}\n"""
+                )
             log_string = (
                 f"""{'#' * width}\n"""
                 f"""{str.center(width, ' ')}\n\n"""
                 f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                 f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
+                f"""{'Explained variance:':>{pad}} {locs['mean_explained_variance']:.4f}\n"""
                 f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                f"""{'Mean KL divergence:':>{pad}} {locs['mean_kl']:.6f}\n"""
                 f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+                f"""{'Encoder loss:':>{pad}} {locs['mean_extra_loss']:.4f}\n"""
+                f"""{'Encoder lin vel loss:':>{pad}} {locs['mean_lin_vel_loss']:.4f}\n"""
+                f"""{'Encoder ang vel loss:':>{pad}} {locs['mean_ang_vel_loss']:.4f}\n"""
+                f"""{'Encoder ang vel x loss:':>{pad}} {locs['mean_ang_vel_x_loss']:.4f}\n"""
+                f"""{'Encoder ang vel y loss:':>{pad}} {locs['mean_ang_vel_y_loss']:.4f}\n"""
+                f"""{'Encoder ang vel z loss:':>{pad}} {locs['mean_ang_vel_z_loss']:.4f}\n"""
+                f"""{'Encoder ang vel x smooth l1:':>{pad}} {locs['mean_ang_vel_x_smooth_l1']:.4f}\n"""
+                f"""{'Encoder proj grav loss:':>{pad}} {locs['mean_proj_grav_loss']:.4f}\n"""
+                f"""{'Bootstrap normalized mse:':>{pad}} {locs['bootstrap_metric']:.4f}\n"""
+                f"""{'Bootstrap ang vel norm mse:':>{pad}} {locs['bootstrap_metric_ang_vel']:.4f}\n"""
+                f"""{'Target ang vel x mean/std/max/rmse:':>{pad}} {locs['ang_vel_target_mean_x']:.4f} / {locs['ang_vel_target_std_x']:.4f} / {locs['ang_vel_target_max_x']:.4f} / {locs['ang_vel_target_rmse_x']:.4f}\n"""
+                f"""{'Target ang vel y mean/std/max/rmse:':>{pad}} {locs['ang_vel_target_mean_y']:.4f} / {locs['ang_vel_target_std_y']:.4f} / {locs['ang_vel_target_max_y']:.4f} / {locs['ang_vel_target_rmse_y']:.4f}\n"""
+                f"""{'Target ang vel z mean/std/max/rmse:':>{pad}} {locs['ang_vel_target_mean_z']:.4f} / {locs['ang_vel_target_std_z']:.4f} / {locs['ang_vel_target_max_z']:.4f} / {locs['ang_vel_target_rmse_z']:.4f}\n"""
             )
+            # log_string += bootstrap_string
             #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
             #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
 
@@ -482,6 +716,8 @@ class OnPolicyRunner:
                 "model_state_dict": self.alg.actor_critic.state_dict(),
                 "encoder_state_dict": self.alg.encoder.state_dict(),
                 "optimizer_state_dict": self.alg.optimizer.state_dict(),
+                "extra_optimizer_state_dict": self.alg.extra_optimizer.state_dict() if self.alg.extra_optimizer is not None else None,
+                "bootstrap_state": self.alg.get_bootstrap_state() if hasattr(self.alg, "get_bootstrap_state") else None,
                 "iter": self.current_learning_iteration,
                 "infos": infos,
             },
@@ -494,6 +730,14 @@ class OnPolicyRunner:
         self.alg.encoder.load_state_dict(loaded_dict["encoder_state_dict"])
         if load_optimizer:
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+            if self.alg.extra_optimizer is not None and loaded_dict.get("extra_optimizer_state_dict") is not None:
+                self.alg.extra_optimizer.load_state_dict(loaded_dict["extra_optimizer_state_dict"])
+        bootstrap_state = loaded_dict.get("bootstrap_state")
+        if bootstrap_state and hasattr(self.alg, "bootstrap_mode"):
+            self.alg.bootstrap_mode = bootstrap_state.get("mode", self.alg.bootstrap_mode)
+            self.alg.bootstrap_metric = bootstrap_state.get("bootstrap_metric")
+            self.alg.bootstrap_encoder_active = bootstrap_state.get("bootstrap_encoder_active", False)
+            self.alg.use_raw_imu_bootstrap = bootstrap_state.get("use_raw_imu", self.alg.use_raw_imu_bootstrap)
         self.current_learning_iteration = loaded_dict["iter"]
         return loaded_dict["infos"]
 

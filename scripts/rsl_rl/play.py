@@ -4,6 +4,7 @@
 
 import argparse
 import csv
+from datetime import datetime
 import importlib
 import os
 import sys
@@ -88,7 +89,7 @@ parser.add_argument(
     "--record_policy_stream_csv",
     action="store_true",
     default=False,
-    help="Record obs_IsaacLab and action_IsaacLab to timestamped CSV files for 1 second from the first policy input.",
+    help="Record obs_IsaacLab, action_IsaacLab, and imu_encoder CSV files until play.py exits.",
 )
 parser.add_argument(
     "--policy_stream_csv_dir",
@@ -122,6 +123,8 @@ import gymnasium as gym
 import os
 import torch
 
+import carb.input
+import omni.appwindow
 try:
     import rclpy
     from rclpy.node import Node
@@ -137,8 +140,64 @@ from isaaclab.envs import ManagerBasedRLEnvCfg,DirectMARLEnv, multi_agent_to_sin
 from isaaclab.utils.dict import print_dict
 from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
+from omni.kit.viewport.utility import capture_viewport_to_file, get_active_viewport
 from pongbot_r2.tasks.controllers import JoystickController, LocalKeyboardController, RemoteKeyboardController
 from pongbot_r2.utils.wrappers.rsl_rl import RslRlPpoAlgorithmMlpCfg, export_mlp_as_onnx, export_policy_as_jit
+
+
+def _load_play_checkpoint_forgiving(ppo_runner: OnPolicyRunner, checkpoint_path: str) -> None:
+    """Load a checkpoint for inference while tolerating critic-shape mismatches."""
+    try:
+        ppo_runner.load(checkpoint_path)
+        return
+    except RuntimeError as err:
+        if "size mismatch" not in str(err):
+            raise
+
+    print("[WARN] Full checkpoint load failed due to state_dict size mismatch. Falling back to actor/encoder-only load.")
+    loaded_dict = torch.load(checkpoint_path, map_location=ppo_runner.device)
+
+    actor_critic_state = ppo_runner.alg.actor_critic.state_dict()
+    checkpoint_actor_critic_state = loaded_dict["model_state_dict"]
+    filtered_actor_critic_state = {}
+    skipped_actor_critic_keys = []
+    for key, value in checkpoint_actor_critic_state.items():
+        if key.startswith("critic."):
+            skipped_actor_critic_keys.append(key)
+            continue
+        if key not in actor_critic_state or actor_critic_state[key].shape != value.shape:
+            skipped_actor_critic_keys.append(key)
+            continue
+        filtered_actor_critic_state[key] = value
+
+    missing_actor_critic_keys, unexpected_actor_critic_keys = ppo_runner.alg.actor_critic.load_state_dict(
+        filtered_actor_critic_state, strict=False
+    )
+
+    encoder_state = ppo_runner.alg.encoder.state_dict()
+    checkpoint_encoder_state = loaded_dict["encoder_state_dict"]
+    filtered_encoder_state = {}
+    skipped_encoder_keys = []
+    for key, value in checkpoint_encoder_state.items():
+        if key not in encoder_state or encoder_state[key].shape != value.shape:
+            skipped_encoder_keys.append(key)
+            continue
+        filtered_encoder_state[key] = value
+
+    missing_encoder_keys, unexpected_encoder_keys = ppo_runner.alg.encoder.load_state_dict(
+        filtered_encoder_state, strict=False
+    )
+
+    ppo_runner.current_learning_iteration = loaded_dict.get("iter", 0)
+    print(
+        "[WARN] Partial checkpoint load summary:",
+        f"skipped_actor_critic={len(skipped_actor_critic_keys)}",
+        f"missing_actor_critic={len(missing_actor_critic_keys)}",
+        f"unexpected_actor_critic={len(unexpected_actor_critic_keys)}",
+        f"skipped_encoder={len(skipped_encoder_keys)}",
+        f"missing_encoder={len(missing_encoder_keys)}",
+        f"unexpected_encoder={len(unexpected_encoder_keys)}",
+    )
 
 
 def _build_manual_controller_cfg(env_cfg: ManagerBasedRLEnvCfg) -> SimpleNamespace:
@@ -190,6 +249,71 @@ def _apply_manual_command(env, command: torch.Tensor) -> torch.Tensor:
     return command_term.command.clone()
 
 
+def _flatten_obs_history(obs_history: torch.Tensor) -> torch.Tensor:
+    return obs_history.flatten(start_dim=1) if obs_history.dim() > 2 else obs_history
+
+
+class ViewportCaptureHotkey:
+    """Capture the active Isaac Sim viewport when the user presses P."""
+
+    def __init__(self, output_dir: str):
+        self.output_dir = output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        self._save_requested = False
+        self._keyboard_sub = None
+        self._viewport_api = None
+        self._input = carb.input.acquire_input_interface()
+        self._app_window = omni.appwindow.get_default_app_window()
+        self._keyboard = None
+
+        if self._app_window is None:
+            print("[WARN] Default app window not found. Viewport capture hotkey disabled.")
+            return
+
+        self._keyboard = self._app_window.get_keyboard()
+        if self._keyboard is None:
+            print("[WARN] App window keyboard not found. Viewport capture hotkey disabled.")
+            return
+
+        self._keyboard_sub = self._input.subscribe_to_keyboard_events(self._keyboard, self._on_keyboard_event)
+        print(f"[INFO] Viewport capture hotkey enabled. Press 'P' to save images under: {self.output_dir}")
+
+    def _on_keyboard_event(self, event, *args, **kwargs):
+        if (
+            event.type == carb.input.KeyboardEventType.KEY_PRESS
+            and event.input == carb.input.KeyboardInput.P
+        ):
+            self._save_requested = True
+        return True
+
+    def _get_viewport_api(self):
+        if self._viewport_api is None:
+            self._viewport_api = get_active_viewport()
+        return self._viewport_api
+
+    def update(self) -> None:
+        if not self._save_requested:
+            return
+
+        viewport_api = self._get_viewport_api()
+        if viewport_api is None:
+            print("[WARN] Active viewport not available yet. Skipping capture request.")
+            self._save_requested = False
+            return
+
+        self._save_requested = False
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        file_path = os.path.join(self.output_dir, f"viewport_{timestamp}.png")
+        capture_viewport_to_file(viewport_api, file_path)
+        print(f"[INFO] Saved viewport capture to: {file_path}")
+
+    def close(self) -> None:
+        if self._keyboard_sub is not None and self._keyboard is not None:
+            self._input.unsubscribe_to_keyboard_events(self._keyboard, self._keyboard_sub)
+            self._keyboard_sub = None
+
+
 class PolicyStreamRosPublisher:
     """Publish policy streams for env 0 as ROS2 Float32MultiArray topics."""
 
@@ -225,9 +349,9 @@ class PolicyStreamRosPublisher:
 
 
 class PolicyStreamCsvRecorder:
-    """Record policy streams for env 0 to CSV files for a fixed number of policy steps."""
+    """Record policy streams for env 0 to CSV files until stopped or an optional step limit is reached."""
 
-    def __init__(self, output_dir: str, max_steps: int = 50):
+    def __init__(self, output_dir: str, max_steps: int | None = None):
         self.output_dir = output_dir
         self.max_steps = max_steps
         self.start_time = None
@@ -293,7 +417,7 @@ class PolicyStreamCsvRecorder:
             self.start_time = 0
             self._init_writers(encoder_output, obs, vel_command, policy_output, imu_gt)
 
-        if self.step_count >= self.max_steps:
+        if self.max_steps is not None and self.step_count >= self.max_steps:
             self._finished = True
             self.close()
             return
@@ -328,7 +452,7 @@ class PolicyStreamCsvRecorder:
             self.imu_file.flush()
 
         self.step_count += 1
-        if self.step_count >= self.max_steps:
+        if self.max_steps is not None and self.step_count >= self.max_steps:
             self._finished = True
             self.close()
 
@@ -342,6 +466,7 @@ class PolicyStreamCsvRecorder:
 
 
 def main():
+    os.environ["PONGBOT_PLAY_IGNORE_REWARD_NAN"] = "1"
     """Play with RSL-RL agent."""
     # parse configuration
     env_cfg: ManagerBasedRLEnvCfg = parse_env_cfg(
@@ -354,6 +479,11 @@ def main():
         env_cfg.terminations.time_out = None
     if args_cli.control_mode != "policy" and args_cli.num_envs is None:
         env_cfg.scene.num_envs = 1
+    if env_cfg.scene.num_envs == 1:
+        env_cfg.viewer.origin_type = "asset_root"
+        env_cfg.viewer.asset_name = "robot"
+        env_cfg.viewer.env_index = 0
+        env_cfg.viewer.eye = (10.0, 10.0, 10.0)
 
     # specify directory for logging experiments
     if args_cli.checkpoint_path is None:
@@ -385,11 +515,12 @@ def main():
         env = multi_agent_to_single_agent(env)
 
     # wrap around environment for rsl-rl
-    env = RslRlVecEnvWrapper(env)
+    env = RslRlVecEnvWrapper(env, clip_actions=10.0)
+    # env = RslRlVecEnvWrapper(env)
     # load previously trained model
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     ppo_runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    ppo_runner.load(resume_path)
+    _load_play_checkpoint_forgiving(ppo_runner, resume_path)
 
     # obtain the trained policy for inference
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
@@ -431,13 +562,21 @@ def main():
         csv_dir = args_cli.policy_stream_csv_dir
         if csv_dir is None:
             csv_dir = os.path.join(log_dir, "policy_stream_csv")
-        policy_stream_recorder = PolicyStreamCsvRecorder(csv_dir, max_steps=50)
-        print(f"[INFO] Recording 50 policy steps to CSV under: {csv_dir}")
+        policy_stream_recorder = PolicyStreamCsvRecorder(csv_dir)
+        print(f"[INFO] Recording policy streams to CSV until exit under: {csv_dir}")
+
+    viewport_capture_hotkey = ViewportCaptureHotkey(os.path.join(log_dir, "viewport_captures"))
     # reset environment
     try:
         obs, obs_dict = env.get_observations()
         obs_history = obs_dict["observations"].get("obsHistory")
-        obs_history = obs_history.flatten(start_dim=1)
+        if obs_history is None:
+            raise RuntimeError("obsHistory not found in observations")
+        if obs_history.dim() >= 3 and obs_history.shape[1] != int(ppo_runner.obs_history_len):
+            raise RuntimeError(
+                f"obsHistory length mismatch: env={obs_history.shape[1]} cfg={int(ppo_runner.obs_history_len)}"
+            )
+        obs_history = _flatten_obs_history(obs_history)
         commands = obs_dict["observations"].get("commands")
         critic_obs = obs_dict["observations"].get("critic")
         if controller is not None:
@@ -456,31 +595,35 @@ def main():
                 if est.shape[1] >= 9 and critic_obs is not None and critic_obs.shape[1] >= 9:
                     imu_gt = critic_obs[:, :9]
                     if step_count % imu_log_period == 0:
+                        base_height = env.unwrapped.scene["robot"].data.root_pos_w[0, 2].item()
                         imu_err = est[0, :9] - imu_gt[0]
-                        print(
-                            "[IMU_EST]",
-                            f"step={step_count}",
-                            f"lin_vel_l2={torch.norm(imu_err[0:3]).item():.4f}",
-                            f"ang_vel_l2={torch.norm(imu_err[3:6]).item():.4f}",
-                            f"proj_gravity_l2={torch.norm(imu_err[6:9]).item():.4f}",
-                            f"imu_l2={torch.norm(imu_err).item():.4f}",
-                            flush=True,
-                        )
+                        # print(
+                        #     "[PLAY_DEBUG]",
+                        #     f"step={step_count}",
+                        #     f"base_height={base_height:.4f}",
+                        #     f"lin_vel_l2={torch.norm(imu_err[0:3]).item():.4f}",
+                        #     f"ang_vel_l2={torch.norm(imu_err[3:6]).item():.4f}",
+                        #     f"proj_gravity_l2={torch.norm(imu_err[6:9]).item():.4f}",
+                        #     f"imu_l2={torch.norm(imu_err).item():.4f}",
+                        #     flush=True,
+                        # )
                 actor_obs = obs
-                if est.shape[1] >= 9 and obs.shape[1] >= 6:
-                    actor_obs = obs.clone()
-                    actor_obs[:, 0:6] = est[:, 3:9]
-                actions = policy(torch.cat((est, actor_obs, commands), dim=-1).detach())
+                #obs_history
+                actions = policy(torch.cat((est, actor_obs, commands, obs_history), dim=-1).detach())
+                # actions = policy(torch.cat((est, actor_obs, commands), dim=-1).detach())
                 if policy_stream_publisher is not None:
                     policy_stream_publisher.publish(est, obs, commands, actions)
                 if policy_stream_recorder is not None:
                     policy_stream_recorder.record(est, obs, commands, actions, imu_gt)
                 # env stepping
-                obs, _, _, infos = env.step(actions)
-                obs_history = infos["observations"].get("obsHistory")
-                obs_history = obs_history.flatten(start_dim=1)
+                obs, _, dones, infos = env.step(actions)
+                viewport_capture_hotkey.update()
                 commands = infos["observations"].get("commands")
                 critic_obs = infos["observations"].get("critic")
+                obs_history = infos["observations"].get("obsHistory")
+                if obs_history is None:
+                    raise RuntimeError("obsHistory not found in step observations")
+                obs_history = _flatten_obs_history(obs_history)
                 if controller is not None:
                     commands = _apply_manual_command(env, controller.get_commands())
                 step_count += 1
@@ -491,6 +634,7 @@ def main():
             policy_stream_publisher.close()
         if policy_stream_recorder is not None:
             policy_stream_recorder.close()
+        viewport_capture_hotkey.close()
         # close the simulator
         env.close()
 

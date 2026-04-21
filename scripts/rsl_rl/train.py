@@ -168,7 +168,8 @@ def main():
         env = multi_agent_to_single_agent(env)
 
     # wrap around environment for rsl-rl
-    env = RslRlVecEnvWrapper(env)
+    env = RslRlVecEnvWrapper(env, clip_actions=10.0)
+    # env = RslRlVecEnvWrapper(env)
 
     # create runner from rsl-rl
     # on_policy_runner_class = eval(agent_cfg.runner_type)

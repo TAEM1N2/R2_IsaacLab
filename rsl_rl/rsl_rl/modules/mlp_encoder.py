@@ -36,6 +36,12 @@ from torch.distributions import Normal
 from torch.nn.modules import rnn
 
 
+def _sanitize_encoder_output(tensor: torch.Tensor, clamp_value: float = 10.0) -> torch.Tensor:
+    """Replace NaN/Inf and clamp encoder outputs to a safe range."""
+    tensor = torch.nan_to_num(tensor, nan=0.0, posinf=clamp_value, neginf=-clamp_value)
+    return torch.clamp(tensor, min=-clamp_value, max=clamp_value)
+
+
 class MLP_Encoder(nn.Module):
     is_mlp_encoder = True
     is_vae = False
@@ -90,10 +96,10 @@ class MLP_Encoder(nn.Module):
         Normal.set_default_validate_args = False
 
     def forward(self, input):
-        return self.encoder(input)
+        return _sanitize_encoder_output(self.encoder(input))
 
     def encode(self, input):
-        self.encoder_out = self.encoder(input)
+        self.encoder_out = _sanitize_encoder_output(self.encoder(input))
         if self.output_detach:
             return self.encoder_out.detach()
         else:
@@ -104,7 +110,7 @@ class MLP_Encoder(nn.Module):
 
     def inference(self, input):
         with torch.no_grad():
-            return self.encoder(input)
+            return _sanitize_encoder_output(self.encoder(input))
 
 
 def get_activation(act_name):

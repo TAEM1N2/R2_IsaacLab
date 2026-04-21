@@ -4,7 +4,7 @@ from isaaclab.utils import configclass
 
 from pongbot_r2.assets.config.pongbot_r2 import PONGBOT_R2_CFG
 from pongbot_r2.tasks.locomotion.cfg.pongbot_r2.limx_base_env_cfg import PFEnvCfg
-from pongbot_r2.tasks.locomotion.cfg.pongbot_r2_imu.limx_base_env_cfg import PFEnvCfg as PFIMUEnvCfg
+from pongbot_r2.tasks.locomotion.cfg.pongbot_r2_imu.without_imu_base_env_cfg import PFEnvCfg as PFIMUEnvCfg
 from pongbot_r2.tasks.locomotion.cfg.pongbot_r2.terrains_cfg import (
     BLIND_ROUGH_TERRAINS_CFG,
     BLIND_ROUGH_TERRAINS_PLAY_CFG,
@@ -55,6 +55,7 @@ class PFBaseEnvCfg(PFEnvCfg):
         
         # update viewport camera
         self.viewer.origin_type = "env"
+        # self.viewer.eye = (100.0, 100.0, 100.0)
 
 
 @configclass
@@ -81,14 +82,15 @@ class PFBaseIMUEnvCfg(PFIMUEnvCfg):
         self.scene.robot = PONGBOT_R2_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.robot.init_state.joint_pos = {
             ".*HR_JOINT": 0.0,
-            ".*HP_JOINT": 0.8,
-            ".*KN_JOINT": -1.5,
+            ".*HP_JOINT": 0.64, #0.8,
+            ".*KN_JOINT": -1.25 #-1.5,
         }
 
         self.events.add_base_mass.params["asset_cfg"].body_names = "BODY"
         self.events.add_base_mass.params["mass_distribution_params"] = (-1.0, 2.0)
         self.terminations.base_contact.params["sensor_cfg"].body_names = "BODY"
-        self.viewer.origin_type = "env"
+        self.viewer.origin_type = "world"
+        self.viewer.eye = (100.0, 100.0, 100.0)
 
 
 @configclass
@@ -192,7 +194,6 @@ class PFBlindRoughIMUEnvCfg(PFBaseIMUEnvCfg):
         super().__post_init__()
 
         self.scene.height_scanner = _make_reward_height_scanner(self.decimation * self.sim.dt)
-        self.observations.critic.heights = None
         self.rewards.pen_base_height.params["sensor_cfg"] = SceneEntityCfg("height_scanner")
 
         self.scene.terrain.terrain_type = "generator"
@@ -205,7 +206,6 @@ class PFBlindRoughIMUEnvCfg_PLAY(PFBaseIMUEnvCfg_PLAY):
         super().__post_init__()
 
         self.scene.height_scanner = _make_reward_height_scanner(self.decimation * self.sim.dt)
-        self.observations.critic.heights = None
         self.rewards.pen_base_height.params["sensor_cfg"] = SceneEntityCfg("height_scanner")
 
         self.scene.terrain.terrain_type = "generator"
@@ -260,6 +260,44 @@ class PFBlindStairEnvCfg_PLAY(PFBaseEnvCfg_PLAY):
         self.events.reset_robot_base.params["pose_range"]["yaw"] = (-0.0, 0.0)
 
         # spawn the robot randomly in the grid (instead of their terrain levels)
+        self.scene.terrain.terrain_type = "generator"
+        self.scene.terrain.max_init_terrain_level = None
+        self.scene.terrain.terrain_generator = STAIRS_TERRAINS_PLAY_CFG.replace(difficulty_range=(0.5, 0.5))
+
+
+@configclass
+class PFBlindStairIMUEnvCfg(PFBaseIMUEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.height_scanner = _make_reward_height_scanner(self.decimation * self.sim.dt)
+        self.rewards.pen_base_height.params["sensor_cfg"] = SceneEntityCfg("height_scanner")
+
+        self.commands.base_velocity.ranges.lin_vel_x = (0.5, 1.0)
+        self.commands.base_velocity.ranges.lin_vel_y = (-0.0, 0.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (-math.pi / 6, math.pi / 6)
+
+        self.rewards.rew_lin_vel_xy2.weight = 2.0
+        self.rewards.rew_ang_vel_z2.weight = 1.0
+
+        self.scene.terrain.terrain_type = "generator"
+        self.scene.terrain.terrain_generator = STAIRS_TERRAINS_CFG
+
+
+@configclass
+class PFBlindStairIMUEnvCfg_PLAY(PFBaseIMUEnvCfg_PLAY):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.height_scanner = _make_reward_height_scanner(self.decimation * self.sim.dt)
+        self.rewards.pen_base_height.params["sensor_cfg"] = SceneEntityCfg("height_scanner")
+
+        self.commands.base_velocity.ranges.lin_vel_x = (0.5, 1.0)
+        self.commands.base_velocity.ranges.lin_vel_y = (-0.0, 0.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (-0.0, 0.0)
+
+        self.events.reset_robot_base.params["pose_range"]["yaw"] = (-0.0, 0.0)
+
         self.scene.terrain.terrain_type = "generator"
         self.scene.terrain.max_init_terrain_level = None
         self.scene.terrain.terrain_generator = STAIRS_TERRAINS_PLAY_CFG.replace(difficulty_range=(0.5, 0.5))
@@ -326,4 +364,3 @@ class PFStairEnvCfgv1_PLAY(PFBaseEnvCfg_PLAY):
         self.scene.terrain.terrain_type = "generator"
         self.scene.terrain.max_init_terrain_level = None
         self.scene.terrain.terrain_generator = STAIRS_TERRAINS_PLAY_CFG.replace(difficulty_range=(0.5, 0.5))
-
