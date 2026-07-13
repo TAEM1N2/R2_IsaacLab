@@ -1,8 +1,8 @@
 """MDP terms for the R2 reproduction of barrier-based style rewards.
 
-@version 0.0.3
+@version 0.0.4
+@update 2026-07-13: Normalize standard torque regularization by the R2 actuator effort limits.
 @update 2026-07-13: Expose rollout diagnostics for every standard and barrier component.
-@update 2026-07-13: Make gait phase valid during observation-manager shape discovery.
 """
 
 from __future__ import annotations
@@ -245,6 +245,14 @@ class PaperStandardReward(ManagerTermBase):
         self.previous_action = torch.zeros(env.num_envs, asset.num_joints, device=env.device)
         self.previous_previous_action = torch.zeros_like(self.previous_action)
         self.nominal_foot_pos_b: torch.Tensor | None = None
+        effort_limits = getattr(asset.data, "joint_effort_limits", None)
+        if effort_limits is None or effort_limits.shape != self.previous_action.shape:
+            raise RuntimeError(
+                "PaperStandardReward requires per-environment joint_effort_limits matching applied torque."
+            )
+        if not torch.isfinite(effort_limits).all() or not torch.all(effort_limits > 0.0):
+            raise RuntimeError("PaperStandardReward received non-positive or non-finite joint effort limits.")
+        self.effort_limits = effort_limits.detach().clone()
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         if env_ids is None:
@@ -260,6 +268,7 @@ class PaperStandardReward(ManagerTermBase):
         action_scale: float,
         foot_position_weight: float,
         height_difference_weight: float,
+        torque_normalized_weight: float,
     ) -> torch.Tensor:
         asset: Articulation = env.scene[asset_cfg.name]
         sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
@@ -273,7 +282,8 @@ class PaperStandardReward(ManagerTermBase):
         contacts = _foot_contact_mask(env, sensor, self.sensor_foot_ids).float()
         foot_velocity_xy = asset.data.body_lin_vel_w[:, self.foot_ids, :2]
         slip = -0.08 * torch.sum(contacts * torch.sum(torch.square(foot_velocity_xy), dim=-1), dim=1)
-        torque = -6.0e-4 * torch.sum(torch.square(asset.data.applied_torque), dim=1)
+        torque_usage = asset.data.applied_torque / self.effort_limits
+        torque = -abs(torque_normalized_weight) * torch.sum(torch.square(torque_usage), dim=1)
 
         current_action = env.action_manager.action
         desired = asset.data.default_joint_pos + action_scale * current_action
@@ -335,6 +345,7 @@ class PaperStandardReward(ManagerTermBase):
             "Contact/thigh_force_max": thigh_force.detach(),
             "Contact/calf_force_max": calf_force.detach(),
             "Motion/applied_torque_rms": torch.sqrt(torch.mean(torch.square(asset.data.applied_torque), dim=1)).detach(),
+            "Motion/torque_usage_rms": torch.sqrt(torch.mean(torch.square(torque_usage), dim=1)).detach(),
             "Motion/joint_velocity_rms": torch.sqrt(torch.mean(torch.square(asset.data.joint_vel), dim=1)).detach(),
             "Motion/action_rms": torch.sqrt(torch.mean(torch.square(current_action), dim=1)).detach(),
             "Motion/action_rate_rms": torch.sqrt(

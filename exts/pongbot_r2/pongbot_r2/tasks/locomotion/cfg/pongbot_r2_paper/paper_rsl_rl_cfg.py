@@ -1,6 +1,7 @@
 """Training configuration for the R2 barrier-paper reproduction.
 
-@version 0.0.1
+@version 0.0.2
+@update 2026-07-13: Configure independent optimization and return-scale-normalized dual critics.
 @update 2026-07-13: Add the paper-scale 160k-sample dual-PPO configuration.
 """
 
@@ -31,6 +32,10 @@ class PaperBarrierAlgorithmCfg:
     num_learning_epochs: int = 5
     num_mini_batches: int = 4
     learning_rate: float = 1.0e-3
+    standard_critic_learning_rate: float = 1.0e-3
+    barrier_critic_learning_rate: float = 1.0e-3
+    estimator_learning_rate: float = 1.0e-3
+    value_scale_min: float = 1.0
     schedule: str = "adaptive"
     gamma: float = 0.99
     lam: float = 0.95

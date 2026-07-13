@@ -1,8 +1,8 @@
 """Runner for the isolated R2 barrier-reward paper task.
 
-@version 0.0.9
+@version 0.0.10
+@update 2026-07-13: Save independent optimizer states and report fixed full-range rough terrain.
 @update 2026-07-13: Print each PaperBarrier terminal metric on its own labeled line.
-@update 2026-07-13: Log rollout, episode-outcome, terrain-specific, and optimization diagnostics.
 """
 
 import os
@@ -493,7 +493,7 @@ class PaperBarrierRunner:
             elapsed = time.time() - start
             mean_standard = standard_sum / self.num_steps_per_env
             mean_barrier = barrier_sum / self.num_steps_per_env
-            terrain_difficulty = min(1.0, 0.2 + max(0, iteration - 500) / 2500.0 * 0.8)
+            terrain_difficulty = 1.0
             rollout_metrics = self._finalize_rollout_diagnostics(rollout_metric_sums, rollout_metric_counts)
             rollout_metrics["Terrain/actual_mean_level"] = float(terrain.terrain_levels.float().mean())
             rollout_metrics["Terrain/actual_max_level"] = float(terrain.terrain_levels.max())
@@ -578,6 +578,7 @@ class PaperBarrierRunner:
             {
                 "model_state_dict": self.alg.actor_critic.state_dict(),
                 "optimizer_state_dict": self.alg.optimizer.state_dict(),
+                "optimizer_state_dicts": self.alg.optimizer_state_dict(),
                 "iter": self.current_learning_iteration,
                 "calibration": self.calibration,
                 "infos": infos,
@@ -589,8 +590,14 @@ class PaperBarrierRunner:
         checkpoint = torch.load(path, map_location=self.device)
         self.alg.actor_critic.load_state_dict(checkpoint["model_state_dict"])
         self.alg.actor_critic.clamp_logstd_()
-        if load_optimizer and "optimizer_state_dict" in checkpoint:
-            self.alg.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if load_optimizer:
+            if "optimizer_state_dicts" in checkpoint:
+                self.alg.load_optimizer_state_dict(checkpoint["optimizer_state_dicts"])
+            elif "optimizer_state_dict" in checkpoint:
+                print(
+                    "[WARN] Legacy PaperBarrier checkpoint has one coupled optimizer; "
+                    "model weights were restored but optimizer state was not."
+                )
         self.current_learning_iteration = checkpoint.get("iter", 0)
         self.calibration = checkpoint.get("calibration", self.calibration)
         self._restore_calibration(self.calibration)

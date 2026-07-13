@@ -1,15 +1,14 @@
 """Standalone R2 environment for the barrier-based locomotion paper method.
 
-@version 0.0.3
+@version 0.0.4
+@update 2026-07-13: Use only the paper's rough-trot terrain family and full reported difficulty range.
 @update 2026-07-13: Expose a non-stacked proprioception alias for play-script compatibility.
-@update 2026-07-13: Apply the 0.2 command deadband and remove the inactive heading range.
 """
 
 import math
 
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -53,7 +52,7 @@ class PaperBarrierSceneCfg(InteractiveSceneCfg):
         prim_path="/World/ground",
         terrain_type="generator",
         terrain_generator=PAPER_BARRIER_ROUGH_TERRAINS_CFG,
-        max_init_terrain_level=0,
+        max_init_terrain_level=None,
         collision_group=-1,
         physics_material=RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -238,6 +237,7 @@ class PaperRewardsCfg:
             "action_scale": 0.10,
             "foot_position_weight": 1.0,
             "height_difference_weight": 1.0,
+            "torque_normalized_weight": 1.0,
         },
     )
     paper_barrier = RewTerm(
@@ -265,18 +265,6 @@ class PaperTerminationsCfg:
 
 
 @configclass
-class PaperCurriculumCfg:
-    global_terrain_difficulty = CurrTerm(
-        func=mdp.PaperTerrainDifficultyCurriculum,
-        params={
-            "initial_difficulty": 0.20,
-            "ramp_start_iteration": 500,
-            "ramp_end_iteration": 3000,
-        },
-    )
-
-
-@configclass
 class PaperBarrierRoughEnvCfg(ManagerBasedRLEnvCfg):
     scene: PaperBarrierSceneCfg = PaperBarrierSceneCfg(num_envs=400, env_spacing=2.5)
     observations: PaperObservationsCfg = PaperObservationsCfg()
@@ -285,7 +273,7 @@ class PaperBarrierRoughEnvCfg(ManagerBasedRLEnvCfg):
     rewards: PaperRewardsCfg = PaperRewardsCfg()
     terminations: PaperTerminationsCfg = PaperTerminationsCfg()
     events: PaperEventsCfg = PaperEventsCfg()
-    curriculum: PaperCurriculumCfg = PaperCurriculumCfg()
+    curriculum = None
 
     def __post_init__(self):
         self.decimation = 5

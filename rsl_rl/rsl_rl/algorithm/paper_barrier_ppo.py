@@ -1,8 +1,8 @@
 """Dual-advantage PPO used by the barrier-style paper reproduction.
 
-@version 0.0.3
+@version 0.0.4
+@update 2026-07-13: Separate actor, dual-critic, and estimator optimization with value-scale normalization.
 @update 2026-07-13: Log KL, clipping, critic explained variance, and pre-clip gradient norm.
-@update 2026-07-13: Freeze rollout-time estimator features during PPO policy epochs.
 """
 
 import torch
@@ -26,9 +26,33 @@ class PaperBarrierPPO:
         self.lam = cfg.get("lam", 0.95)
         self.max_grad_norm = cfg.get("max_grad_norm", 1.0)
         self.learning_rate = cfg.get("learning_rate", 1.0e-3)
+        self.standard_critic_learning_rate = cfg.get(
+            "standard_critic_learning_rate", self.learning_rate
+        )
+        self.barrier_critic_learning_rate = cfg.get(
+            "barrier_critic_learning_rate", self.learning_rate
+        )
+        self.estimator_learning_rate = cfg.get("estimator_learning_rate", self.learning_rate)
+        self.value_scale_min = cfg.get("value_scale_min", 1.0)
         self.desired_kl = cfg.get("desired_kl", 0.01)
         self.schedule = cfg.get("schedule", "adaptive")
-        self.optimizer = torch.optim.Adam(actor_critic.parameters(), lr=self.learning_rate)
+
+        self.actor_parameters = tuple(actor_critic.actor.parameters()) + (actor_critic.logstd,)
+        self.standard_critic_parameters = tuple(actor_critic.standard_critic.parameters())
+        self.barrier_critic_parameters = tuple(actor_critic.barrier_critic.parameters())
+        self.estimator_parameters = tuple(actor_critic.estimator.parameters())
+        self.actor_optimizer = torch.optim.Adam(self.actor_parameters, lr=self.learning_rate)
+        self.standard_critic_optimizer = torch.optim.Adam(
+            self.standard_critic_parameters, lr=self.standard_critic_learning_rate
+        )
+        self.barrier_critic_optimizer = torch.optim.Adam(
+            self.barrier_critic_parameters, lr=self.barrier_critic_learning_rate
+        )
+        self.estimator_optimizer = torch.optim.Adam(
+            self.estimator_parameters, lr=self.estimator_learning_rate
+        )
+        # Compatibility alias for utilities that only inspect the actor optimizer.
+        self.optimizer = self.actor_optimizer
         self.storage: PaperBarrierStorage | None = None
 
     def init_storage(self, num_envs, num_steps, proprio_dim, command_dim, target_dim, action_dim):
@@ -59,6 +83,14 @@ class PaperBarrierPPO:
         self.storage.compute_returns(last_standard, last_barrier, self.gamma, self.lam)
 
     def update(self) -> dict[str, float]:
+        standard_value_scale = torch.clamp(
+            self.storage.standard_returns[: self.storage.step].std(unbiased=False),
+            min=self.value_scale_min,
+        ).detach()
+        barrier_value_scale = torch.clamp(
+            self.storage.barrier_returns[: self.storage.step].std(unbiased=False),
+            min=self.value_scale_min,
+        ).detach()
         totals = {
             "policy_loss": 0.0,
             "standard_value_loss": 0.0,
@@ -74,6 +106,12 @@ class PaperBarrierPPO:
             "standard_explained_variance": 0.0,
             "barrier_explained_variance": 0.0,
             "gradient_norm_pre_clip": 0.0,
+            "actor_gradient_norm_pre_clip": 0.0,
+            "standard_critic_gradient_norm_pre_clip": 0.0,
+            "barrier_critic_gradient_norm_pre_clip": 0.0,
+            "estimator_gradient_norm_pre_clip": 0.0,
+            "standard_value_scale": 0.0,
+            "barrier_value_scale": 0.0,
             "action_std_mean": 0.0,
         }
         updates = 0
@@ -109,10 +147,16 @@ class PaperBarrierPPO:
             )
             standard_value, barrier_value = self.actor_critic.evaluate(critic_input)
             standard_value_loss = self._value_loss(
-                standard_value, batch["standard_values"], batch["standard_returns"]
+                standard_value,
+                batch["standard_values"],
+                batch["standard_returns"],
+                standard_value_scale,
             )
             barrier_value_loss = self._value_loss(
-                barrier_value, batch["barrier_values"], batch["barrier_returns"]
+                barrier_value,
+                batch["barrier_values"],
+                batch["barrier_returns"],
+                barrier_value_scale,
             )
             standard_explained_variance = self._explained_variance(
                 standard_value.detach(), batch["standard_returns"]
@@ -128,18 +172,36 @@ class PaperBarrierPPO:
             contact_loss = F.binary_cross_entropy(estimate[:, 7:], target[:, 7:])
             estimator_loss = velocity_loss + height_loss + contact_loss
             entropy = self.actor_critic.entropy.mean()
-            loss = (
-                policy_loss
-                + self.value_loss_coef * (standard_value_loss + barrier_value_loss)
-                + self.estimator_loss_coef * estimator_loss
-                - self.entropy_coef * entropy
-            )
 
-            self.optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            gradient_norm = torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
-            self.optimizer.step()
+            actor_loss = policy_loss - self.entropy_coef * entropy
+            self.actor_optimizer.zero_grad(set_to_none=True)
+            actor_loss.backward()
+            actor_gradient_norm = torch.nn.utils.clip_grad_norm_(
+                self.actor_parameters, self.max_grad_norm
+            )
+            self.actor_optimizer.step()
             self.actor_critic.clamp_logstd_()
+
+            self.standard_critic_optimizer.zero_grad(set_to_none=True)
+            (self.value_loss_coef * standard_value_loss).backward()
+            standard_critic_gradient_norm = torch.nn.utils.clip_grad_norm_(
+                self.standard_critic_parameters, self.max_grad_norm
+            )
+            self.standard_critic_optimizer.step()
+
+            self.barrier_critic_optimizer.zero_grad(set_to_none=True)
+            (self.value_loss_coef * barrier_value_loss).backward()
+            barrier_critic_gradient_norm = torch.nn.utils.clip_grad_norm_(
+                self.barrier_critic_parameters, self.max_grad_norm
+            )
+            self.barrier_critic_optimizer.step()
+
+            self.estimator_optimizer.zero_grad(set_to_none=True)
+            (self.estimator_loss_coef * estimator_loss).backward()
+            estimator_gradient_norm = torch.nn.utils.clip_grad_norm_(
+                self.estimator_parameters, self.max_grad_norm
+            )
+            self.estimator_optimizer.step()
 
             if self.desired_kl is not None and self.schedule == "adaptive":
                 with torch.no_grad():
@@ -147,7 +209,7 @@ class PaperBarrierPPO:
                         self.learning_rate = max(1.0e-5, self.learning_rate / 1.5)
                     elif 0.0 < kl < 0.5 * self.desired_kl:
                         self.learning_rate = min(1.0e-2, self.learning_rate * 1.5)
-                    for group in self.optimizer.param_groups:
+                    for group in self.actor_optimizer.param_groups:
                         group["lr"] = self.learning_rate
 
             values = (
@@ -164,7 +226,13 @@ class PaperBarrierPPO:
                 ratio.mean(),
                 standard_explained_variance,
                 barrier_explained_variance,
-                gradient_norm,
+                actor_gradient_norm,
+                actor_gradient_norm,
+                standard_critic_gradient_norm,
+                barrier_critic_gradient_norm,
+                estimator_gradient_norm,
+                standard_value_scale,
+                barrier_value_scale,
                 new_std.mean(),
             )
             for key, value in zip(totals, values):
@@ -173,14 +241,37 @@ class PaperBarrierPPO:
 
         self.storage.clear()
         return {key: value / max(1, updates) for key, value in totals.items()} | {
-            "learning_rate": self.learning_rate
+            "learning_rate": self.learning_rate,
+            "standard_critic_learning_rate": self.standard_critic_learning_rate,
+            "barrier_critic_learning_rate": self.barrier_critic_learning_rate,
+            "estimator_learning_rate": self.estimator_learning_rate,
         }
 
-    def _value_loss(self, value, old_value, returns):
+    def optimizer_state_dict(self) -> dict[str, dict]:
+        """Return every independent optimizer state for exact continuation."""
+        return {
+            "actor": self.actor_optimizer.state_dict(),
+            "standard_critic": self.standard_critic_optimizer.state_dict(),
+            "barrier_critic": self.barrier_critic_optimizer.state_dict(),
+            "estimator": self.estimator_optimizer.state_dict(),
+        }
+
+    def load_optimizer_state_dict(self, state_dicts: dict[str, dict]) -> None:
+        """Restore optimizer states saved by :meth:`optimizer_state_dict`."""
+        self.actor_optimizer.load_state_dict(state_dicts["actor"])
+        self.standard_critic_optimizer.load_state_dict(state_dicts["standard_critic"])
+        self.barrier_critic_optimizer.load_state_dict(state_dicts["barrier_critic"])
+        self.estimator_optimizer.load_state_dict(state_dicts["estimator"])
+
+    def _value_loss(self, value, old_value, returns, value_scale):
+        """Compute a dimensionless critic loss while retaining raw-value predictions."""
         if self.cfg.get("use_clipped_value_loss", True):
-            clipped = old_value + torch.clamp(value - old_value, -self.clip_param, self.clip_param)
-            return torch.max(torch.square(value - returns), torch.square(clipped - returns)).mean()
-        return torch.square(value - returns).mean()
+            value_clip = self.clip_param * value_scale
+            clipped = old_value + torch.clamp(value - old_value, -value_clip, value_clip)
+            squared_error = torch.max(torch.square(value - returns), torch.square(clipped - returns))
+        else:
+            squared_error = torch.square(value - returns)
+        return (squared_error / torch.square(value_scale)).mean()
 
     @staticmethod
     def _explained_variance(value: torch.Tensor, returns: torch.Tensor) -> torch.Tensor:

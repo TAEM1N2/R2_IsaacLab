@@ -40,6 +40,9 @@ python scripts/rsl_rl/train.py \
 - critic 입력: actor와 같은 proprioception/command에 실제 11차원 privileged target을 결합
 - critic은 standard reward와 barrier reward용으로 각각 하나씩 사용한다.
 - 두 reward는 별도 GAE와 advantage 정규화를 거친 뒤 actor에서 `0.5 / 0.5`로 결합한다.
+- actor, standard critic, barrier critic, estimator는 optimizer와 gradient clipping을 공유하지 않는다.
+- 두 critic은 raw value를 예측하되 각 rollout return 표준편차로 value loss와 value clip 폭을
+  독립 정규화한다.
 - rollout storage에는 중복 observation history를 저장하지 않는다.
 
 ## R2 자동 보정
@@ -57,18 +60,36 @@ geometry와 force 측정 시점을 분리한다.
 측정 결과는 checkpoint의 `calibration` 필드에 저장되고 재개 시 복원된다. 관절 각도,
 관절 속도, action bound처럼 단위가 로봇 길이와 무관한 barrier는 scale하지 않는다.
 
-## Terrain과 curriculum
+## Rough-trot terrain
 
-terrain 비율은 flat 20%, bumpy 20%, slope up/down 각 10%, stairs up/down 각 10%,
-steps 20%다. iteration 0~500은 전체 난도의 20%까지 사용하고, 500~3,000에서
-논문 최대 난도까지 선형 확장한다. reset 시 현재 상한 이하 row를 균등 표본화하며,
-성공률 기반 승급·강등은 사용하지 않는다.
+이 task는 논문의 quadruped rough-terrain trot policy만 대상으로 한다. 비율은 flat 25%,
+bumpy 25%, slope up/down 각 12.5%, stairs up/down 각 12.5%다. 논문이 공개한 최대값인
+6 cm bump, 27도 slope, 20 cm stair를 사용한다. 요청 범위 밖인 34.5 cm discrete step과
+별도 high-step/gallop task는 포함하지 않는다.
+
+논문은 rough-trot policy에 대한 난도 curriculum을 명시하지 않았으므로 기존의 임의
+iteration ramp를 제거했다. 시작부터 0~100% terrain row를 400개 병렬 환경에 분산해 사용하며,
+`Curriculum/terrain_difficulty`는 고정값 1.0이다.
 
 ## 재현 가정
+
+논문은 rough terrain 종류별 표본 비율을 공개하지 않았다. 위의 25/25/12.5% 비율은 flat과
+bumpy를 충분히 유지하면서 상승·하강 slope/stairs를 균형 있게 배분한 재현 가정이다. 또한
+optimizer 분리와 critic value-scale 처리는 논문에 명시된 설정이 아니라, 두 reward scale의
+간섭을 막기 위해 이번 실험에서 명시적으로 요청된 PPO 안정화 확장이다. actor의 update는
+논문대로 개별 정규화한 standard/barrier advantage를 0.5/0.5로 결합한다.
 
 논문에 수치가 공개되지 않은 nominal Cartesian foot-position 항과 front/rear
 height-difference 항은 보수적으로 각각 1.0을 사용한다. 이는 논문의 공개값이 아니라
 명시적인 reproduction assumption이다.
+
+논문의 raw torque 계수는 로봇 effort scale이 달라 R2에 그대로 대응하지 않는다. Standard
+torque regularization은 R2 actuator limit(HR/HP 120 Nm, knee 320 Nm)으로 torque를 나눈 뒤
+제곱합에 weight 1.0을 적용한다. 따라서 관절별 실제 사용 가능 torque 비율을 같은 기준으로
+제한한다.
+
+기존 coupled-optimizer checkpoint의 model weight는 읽을 수 있지만 optimizer state는 새 구조와
+호환되지 않는다. 이 변경의 본 학습 비교는 checkpoint 재개가 아니라 scratch run으로 수행한다.
 
 주요 TensorBoard 항목은 `Reward/paper_standard_per_step`,
 `Reward/paper_barrier_per_step`, `Loss/*estimator_loss`,
@@ -119,16 +140,16 @@ TensorBoard에서는 다음 순서로 판단한다.
 5. `Tracking/stationary_xy_speed`: 정지 명령 환경의 미끄러짐·떨림 속도이며 0에 가까워야 한다.
 6. `Contact/body_rate`, `Contact/thigh_rate`: rollout 전체 contact 비율이며 0에 가까워야 한다.
 7. `TerrainSuccess/*_timeout_rate`, `TerrainSuccess/*_tracking_rate`: terrain 종류별 생존·추종 성공률이다.
-8. `Terrain/actual_mean_level`: 실제 표본 terrain level이다. 예약된 난도인
-   `Curriculum/terrain_difficulty`와 구분해서 본다.
+8. `Terrain/actual_mean_level`: full-range terrain에서 실제 표본된 평균 row다.
 9. `Diagnostics/*violation`, `ConstraintViolation/*`: gait, clearance, joint, body height,
    base motion 제약 위반율이며 낮아져야 한다.
 10. `BarrierTerm/*`: barrier 총합이 악화될 때 어떤 제약 항이 원인인지 찾는 데 사용한다.
 11. `StandardPenalty/*`, `Motion/*`: slip, torque, action rate/acceleration과 실제 RMS 움직임을
     함께 보고 sim-to-real regularization이 과도하거나 약한지 판단한다.
 12. `Loss/mean_kl`, `Loss/clip_fraction`, `Loss/*explained_variance`,
-    `Loss/gradient_norm_pre_clip`, `Loss/learning_rate`: PPO 최적화 안정성을 판단한다. KL은 설정값
-    0.01 주변, explained variance는 1 방향이 바람직하며 LR이 상한에 계속 붙는지 확인한다.
+    `Loss/*gradient_norm_pre_clip`, `Loss/*value_scale`, `Loss/learning_rate`: PPO 최적화 안정성을
+    판단한다. KL은 설정값 0.01 주변, explained variance는 1 방향이 바람직하며 actor와 두 critic의
+    gradient norm이 독립적으로 안정되는지 확인한다.
 
 기존 `Diagnostics/*`는 마지막 simulation step만 기록했지만, 새 로그는 환경 400개 × 400 step
 전체를 누적한 rollout 평균이다. `Train/mean_episode_length`는 최근 100개 episode의 이동 평균으로

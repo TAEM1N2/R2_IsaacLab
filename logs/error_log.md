@@ -1,13 +1,24 @@
 # 오류 기록
 
 <details open>
-<summary>2026-07-13 16:36 [E007] [테스트] PaperBarrier helper의 AppLauncher 외부 package import 실패</summary>
+<summary>2026-07-13 18:55 [E008] [테스트] PaperBarrier checkpoint 단위 테스트 실행 환경 누락</summary>
 
-- 증상: 순수 episode/rollout metric helper mock test에서 `rsl_rl.runner`를 일반 import하자 `ModuleNotFoundError: omni.kit`으로 중단됨.
-- 원인: `rsl_rl.runner.__init__`가 기존 `OnPolicyRunner`를 함께 import하며, 해당 모듈은 Isaac Sim AppLauncher가 먼저 생성되어야 하는 `omni.kit`에 의존함.
-- 확인: `paper_barrier_runner.py` 파일만 직접 로드한 동일 mock test에서 timeout/early-termination, terrain별 성공률, finite rollout 평균 계산이 모두 통과함.
-- 해결: 순수 helper 검증은 파일 직접 로드를 사용하고, 전체 runner 통합 검증은 AppLauncher를 사용하는 실제 train smoke로 수행하도록 구분함.
-- 관련 파일: `rsl_rl/rsl_rl/runner/paper_barrier_runner.py`
+- 증상: 독립 optimizer checkpoint 왕복 테스트의 첫 실행은 runner mock에 `device`가 없어 실패했고, 재실행은 base Python에 PyTorch가 없어 중단됨.
+- 원인: 실제 runner 생성자가 설정하는 `device`를 `__new__` 기반 mock에서 생략했고, IsaacLab conda Python 대신 base Python을 사용함.
+- 확인: mock에 `device="cpu"`를 설정하고 `/home/rclab/miniconda3/envs/env_isaaclab/bin/python`으로 재실행하여 actor, 두 critic, estimator의 optimizer state 저장·복원을 모두 통과함.
+- 해결: IsaacLab 의존 단위 테스트는 해당 conda Python을 사용하고 runner mock에는 생성자 필드를 명시함. 현재 GPU 학습과 충돌하는 전체 Isaac Sim smoke는 실행하지 않음.
+- 관련 파일: `rsl_rl/rsl_rl/runner/paper_barrier_runner.py`, `rsl_rl/rsl_rl/algorithm/paper_barrier_ppo.py`
+
+</details>
+
+<details>
+<summary>2026-07-13 16:36 [E007] [테스트] PaperBarrier IsaacLab 모듈의 AppLauncher 외부 import 실패</summary>
+
+- 증상: 순수 episode/rollout helper에서 `rsl_rl.runner`를 일반 import하면 `omni.kit`, terrain config를 직접 import하면 `omni.log` 부재로 중단됨.
+- 원인: 두 import 경로 모두 Isaac Sim AppLauncher가 먼저 생성해야 하는 `omni` package에 의존함.
+- 확인: `paper_barrier_runner.py` 파일만 직접 로드한 helper test는 통과했고, terrain 구성은 Python AST 기반 정적 계약 검사로 대체함.
+- 해결: 순수 helper는 파일 직접 로드, config는 AST 검사, 전체 통합 검증은 AppLauncher를 사용하는 train smoke로 구분함.
+- 관련 파일: `rsl_rl/rsl_rl/runner/paper_barrier_runner.py`, `exts/pongbot_r2/pongbot_r2/tasks/locomotion/cfg/pongbot_r2_paper/terrains_cfg.py`
 
 </details>
 
