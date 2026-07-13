@@ -1,8 +1,8 @@
 """Dual-advantage PPO used by the barrier-style paper reproduction.
 
-@version 0.0.2
+@version 0.0.3
+@update 2026-07-13: Log KL, clipping, critic explained variance, and pre-clip gradient norm.
 @update 2026-07-13: Freeze rollout-time estimator features during PPO policy epochs.
-@update 2026-07-13: Add separate standard/barrier GAE and equal actor mixing.
 """
 
 import torch
@@ -68,6 +68,13 @@ class PaperBarrierPPO:
             "height_estimator_loss": 0.0,
             "contact_estimator_loss": 0.0,
             "entropy": 0.0,
+            "mean_kl": 0.0,
+            "clip_fraction": 0.0,
+            "ratio_mean": 0.0,
+            "standard_explained_variance": 0.0,
+            "barrier_explained_variance": 0.0,
+            "gradient_norm_pre_clip": 0.0,
+            "action_std_mean": 0.0,
         }
         updates = 0
         for batch in self.storage.mini_batches(self.num_mini_batches, self.num_learning_epochs):
@@ -77,6 +84,19 @@ class PaperBarrierPPO:
             self.actor_critic.update_distribution(actor_input)
             new_log_prob = self.actor_critic.get_actions_log_prob(batch["actions"])
             ratio = torch.exp(new_log_prob - batch["log_probs"])
+            old_std = batch["action_std"]
+            old_mean = batch["action_mean"]
+            new_std = self.actor_critic.action_std
+            new_mean = self.actor_critic.action_mean
+            with torch.no_grad():
+                kl = torch.sum(
+                    torch.log(new_std / old_std + 1.0e-5)
+                    + (torch.square(old_std) + torch.square(old_mean - new_mean))
+                    / (2.0 * torch.square(new_std))
+                    - 0.5,
+                    dim=-1,
+                ).mean()
+                clip_fraction = torch.mean((torch.abs(ratio - 1.0) > self.clip_param).float())
             mixed_advantage = 0.5 * batch["standard_advantages"] + 0.5 * batch["barrier_advantages"]
             surrogate = -mixed_advantage * ratio
             surrogate_clipped = -mixed_advantage * torch.clamp(
@@ -93,6 +113,12 @@ class PaperBarrierPPO:
             )
             barrier_value_loss = self._value_loss(
                 barrier_value, batch["barrier_values"], batch["barrier_returns"]
+            )
+            standard_explained_variance = self._explained_variance(
+                standard_value.detach(), batch["standard_returns"]
+            )
+            barrier_explained_variance = self._explained_variance(
+                barrier_value.detach(), batch["barrier_returns"]
             )
 
             target = batch["targets"]
@@ -111,23 +137,12 @@ class PaperBarrierPPO:
 
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+            gradient_norm = torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.optimizer.step()
             self.actor_critic.clamp_logstd_()
 
             if self.desired_kl is not None and self.schedule == "adaptive":
                 with torch.no_grad():
-                    old_std = batch["action_std"]
-                    old_mean = batch["action_mean"]
-                    new_std = self.actor_critic.action_std
-                    new_mean = self.actor_critic.action_mean
-                    kl = torch.sum(
-                        torch.log(new_std / old_std + 1.0e-5)
-                        + (torch.square(old_std) + torch.square(old_mean - new_mean))
-                        / (2.0 * torch.square(new_std))
-                        - 0.5,
-                        dim=-1,
-                    ).mean()
                     if kl > 2.0 * self.desired_kl:
                         self.learning_rate = max(1.0e-5, self.learning_rate / 1.5)
                     elif 0.0 < kl < 0.5 * self.desired_kl:
@@ -144,6 +159,13 @@ class PaperBarrierPPO:
                 height_loss,
                 contact_loss,
                 entropy,
+                kl,
+                clip_fraction,
+                ratio.mean(),
+                standard_explained_variance,
+                barrier_explained_variance,
+                gradient_norm,
+                new_std.mean(),
             )
             for key, value in zip(totals, values):
                 totals[key] += float(value.detach())
@@ -159,3 +181,10 @@ class PaperBarrierPPO:
             clipped = old_value + torch.clamp(value - old_value, -self.clip_param, self.clip_param)
             return torch.max(torch.square(value - returns), torch.square(clipped - returns)).mean()
         return torch.square(value - returns).mean()
+
+    @staticmethod
+    def _explained_variance(value: torch.Tensor, returns: torch.Tensor) -> torch.Tensor:
+        """Return one minus residual variance divided by target variance."""
+        target_variance = torch.var(returns, unbiased=False)
+        residual_variance = torch.var(returns - value, unbiased=False)
+        return 1.0 - residual_variance / torch.clamp(target_variance, min=1.0e-8)

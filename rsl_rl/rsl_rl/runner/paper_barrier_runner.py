@@ -1,8 +1,8 @@
 """Runner for the isolated R2 barrier-reward paper task.
 
-@version 0.0.7
+@version 0.0.8
+@update 2026-07-13: Log rollout, episode-outcome, terrain-specific, and optimization diagnostics.
 @update 2026-07-13: Record rollout-time estimator features for stationary PPO inputs.
-@update 2026-07-13: Separate early canonical geometry capture from full settling-force calibration.
 """
 
 import os
@@ -33,6 +33,7 @@ class PaperBarrierRunner:
         self.uses_context_estimator = False
         self.base_env = self._find_base_env(env)
         self.calibration = self._calibrate_robot(train_cfg.get("calibration_steps", 100))
+        self.terrain_column_names = self._terrain_column_names()
 
         obs, extras = env.get_observations()
         observations = extras["observations"]
@@ -199,6 +200,195 @@ class PaperBarrierRunner:
             manager._step_reward[:, barrier_idx].to(self.device),
         )
 
+    def _terrain_column_names(self) -> list[str]:
+        """Map curriculum terrain column indices to their configured terrain names."""
+        generator = getattr(self.base_env.cfg.scene.terrain, "terrain_generator", None)
+        if generator is None or not getattr(generator, "sub_terrains", None):
+            return ["unknown"]
+
+        items = list(generator.sub_terrains.items())
+        total = sum(float(cfg.proportion) for _, cfg in items)
+        names = []
+        for column in range(int(generator.num_cols)):
+            point = column / float(generator.num_cols) + 0.001
+            cumulative = 0.0
+            selected_name = items[-1][0]
+            for name, cfg in items:
+                cumulative += float(cfg.proportion) / total
+                if point < cumulative:
+                    selected_name = name
+                    break
+            names.append(selected_name)
+        return names
+
+    @staticmethod
+    def _accumulate_metric(sums: dict, counts: dict, name: str, value: torch.Tensor) -> None:
+        """Accumulate finite tensor values without synchronizing the GPU each step."""
+        value = value.float()
+        finite = torch.isfinite(value)
+        finite_sum = torch.where(finite, value, 0.0).sum()
+        finite_count = finite.sum()
+        if name not in sums:
+            sums[name] = finite_sum
+            counts[name] = finite_count
+        else:
+            sums[name] += finite_sum
+            counts[name] += finite_count
+
+    def _accumulate_rollout_diagnostics(self, sums: dict, counts: dict) -> None:
+        """Collect reward diagnostics as true rollout averages instead of final-step snapshots."""
+        for group_name in ("_paper_standard_metrics", "_paper_barrier_metrics"):
+            for name, value in getattr(self.base_env, group_name, {}).items():
+                self._accumulate_metric(sums, counts, name, value)
+
+        barrier_metrics = getattr(self.base_env, "_paper_barrier_metrics", {})
+        moving = barrier_metrics.get("Tracking/is_moving_command")
+        lin_error = barrier_metrics.get("Tracking/lin_vel_xy_error")
+        actual_speed = barrier_metrics.get("Tracking/actual_xy_speed")
+        if moving is not None and lin_error is not None and actual_speed is not None:
+            moving_mask = moving > 0.5
+            self._accumulate_metric(
+                sums,
+                counts,
+                "Tracking/moving_lin_vel_xy_error",
+                lin_error[moving_mask],
+            )
+            self._accumulate_metric(
+                sums,
+                counts,
+                "Tracking/stationary_xy_speed",
+                actual_speed[~moving_mask],
+            )
+
+    @staticmethod
+    def _finalize_rollout_diagnostics(sums: dict, counts: dict) -> dict[str, float]:
+        """Convert accumulated rollout tensors to scalar means once per iteration."""
+        result = {}
+        for name, value_sum in sums.items():
+            denominator = torch.clamp(counts[name], min=1)
+            result[name] = float((value_sum / denominator).detach())
+        return result
+
+    def _new_episode_statistics(self) -> dict[str, torch.Tensor]:
+        """Allocate iteration-local episode outcome accumulators."""
+        scalar_names = (
+            "count",
+            "timeout",
+            "tracking_success",
+            "length_sum",
+            "reward_sum",
+            "xy_error_sum",
+            "yaw_error_sum",
+            "moving_count",
+            "moving_success",
+            "stationary_count",
+            "stationary_success",
+            "level_sum",
+        )
+        statistics = {name: torch.zeros((), device=self.device) for name in scalar_names}
+        num_columns = len(self.terrain_column_names)
+        for name in ("terrain_count", "terrain_timeout", "terrain_tracking_success", "terrain_length_sum"):
+            statistics[name] = torch.zeros(num_columns, device=self.device)
+        return statistics
+
+    def _record_episode_outcomes(
+        self,
+        statistics: dict[str, torch.Tensor],
+        done_ids: torch.Tensor,
+        time_outs: torch.Tensor,
+        episode_reward: torch.Tensor,
+        episode_length: torch.Tensor,
+        episode_xy_error: torch.Tensor,
+        episode_yaw_error: torch.Tensor,
+        episode_moving_steps: torch.Tensor,
+        episode_terrain_type: torch.Tensor,
+        episode_terrain_level: torch.Tensor,
+    ) -> None:
+        """Record survival, tracking, and terrain outcomes for completed episodes."""
+        if done_ids.numel() == 0:
+            return
+
+        lengths = torch.clamp(episode_length[done_ids], min=1.0)
+        xy_error = episode_xy_error[done_ids] / lengths
+        yaw_error = episode_yaw_error[done_ids] / lengths
+        timeout = time_outs[done_ids] > 0.5
+        tracking_success = timeout & (xy_error <= 0.4) & (yaw_error <= 0.4)
+        moving_episode = episode_moving_steps[done_ids] >= 0.5 * lengths
+        terrain_types = episode_terrain_type[done_ids].long().clamp(0, len(self.terrain_column_names) - 1)
+        ones = torch.ones_like(lengths)
+
+        statistics["count"] += ones.sum()
+        statistics["timeout"] += timeout.float().sum()
+        statistics["tracking_success"] += tracking_success.float().sum()
+        statistics["length_sum"] += lengths.sum()
+        statistics["reward_sum"] += episode_reward[done_ids].sum()
+        statistics["xy_error_sum"] += xy_error.sum()
+        statistics["yaw_error_sum"] += yaw_error.sum()
+        statistics["moving_count"] += moving_episode.float().sum()
+        statistics["moving_success"] += (tracking_success & moving_episode).float().sum()
+        statistics["stationary_count"] += (~moving_episode).float().sum()
+        statistics["stationary_success"] += (tracking_success & ~moving_episode).float().sum()
+        statistics["level_sum"] += episode_terrain_level[done_ids].float().sum()
+        statistics["terrain_count"] += torch.bincount(
+            terrain_types,
+            weights=ones,
+            minlength=len(self.terrain_column_names),
+        )
+        statistics["terrain_timeout"] += torch.bincount(
+            terrain_types,
+            weights=timeout.float(),
+            minlength=len(self.terrain_column_names),
+        )
+        statistics["terrain_tracking_success"] += torch.bincount(
+            terrain_types,
+            weights=tracking_success.float(),
+            minlength=len(self.terrain_column_names),
+        )
+        statistics["terrain_length_sum"] += torch.bincount(
+            terrain_types,
+            weights=lengths,
+            minlength=len(self.terrain_column_names),
+        )
+
+    def _finalize_episode_statistics(self, statistics: dict[str, torch.Tensor]) -> dict[str, float]:
+        """Create interpretable episode and per-terrain success metrics."""
+        count = torch.clamp(statistics["count"], min=1.0)
+        moving_count = torch.clamp(statistics["moving_count"], min=1.0)
+        stationary_count = torch.clamp(statistics["stationary_count"], min=1.0)
+        metrics = {
+            "Episode/completed_count": float(statistics["count"]),
+            "Episode/timeout_rate": float(statistics["timeout"] / count),
+            "Episode/early_termination_rate": float(1.0 - statistics["timeout"] / count),
+            "Episode/tracking_success_rate": float(statistics["tracking_success"] / count),
+            "Episode/moving_tracking_success_rate": float(statistics["moving_success"] / moving_count),
+            "Episode/stationary_tracking_success_rate": float(
+                statistics["stationary_success"] / stationary_count
+            ),
+            "Episode/mean_length_current": float(statistics["length_sum"] / count),
+            "Episode/survival_fraction": float(
+                statistics["length_sum"] / count / float(self.env.max_episode_length)
+            ),
+            "Episode/mean_reward_current": float(statistics["reward_sum"] / count),
+            "Episode/mean_lin_vel_xy_max_abs_error": float(statistics["xy_error_sum"] / count),
+            "Episode/mean_yaw_rate_error": float(statistics["yaw_error_sum"] / count),
+            "Terrain/episode_mean_level": float(statistics["level_sum"] / count),
+        }
+
+        unique_names = list(dict.fromkeys(self.terrain_column_names))
+        for terrain_name in unique_names:
+            indices = [index for index, name in enumerate(self.terrain_column_names) if name == terrain_name]
+            terrain_count = torch.clamp(statistics["terrain_count"][indices].sum(), min=1.0)
+            metrics[f"TerrainSuccess/{terrain_name}_timeout_rate"] = float(
+                statistics["terrain_timeout"][indices].sum() / terrain_count
+            )
+            metrics[f"TerrainSuccess/{terrain_name}_tracking_rate"] = float(
+                statistics["terrain_tracking_success"][indices].sum() / terrain_count
+            )
+            metrics[f"TerrainEpisode/{terrain_name}_mean_length"] = float(
+                statistics["terrain_length_sum"][indices].sum() / terrain_count
+            )
+        return metrics
+
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         if self.log_dir is not None:
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
@@ -214,6 +404,12 @@ class PaperBarrierRunner:
         length_buffer = deque(maxlen=100)
         episode_reward = torch.zeros(self.env.num_envs, device=self.device)
         episode_length = torch.zeros(self.env.num_envs, device=self.device)
+        episode_xy_error = torch.zeros(self.env.num_envs, device=self.device)
+        episode_yaw_error = torch.zeros(self.env.num_envs, device=self.device)
+        episode_moving_steps = torch.zeros(self.env.num_envs, device=self.device)
+        terrain = self.base_env.scene.terrain
+        episode_terrain_type = terrain.terrain_types.to(self.device).clone()
+        episode_terrain_level = terrain.terrain_levels.to(self.device).clone()
         total_steps = 0
 
         for iteration in range(self.current_learning_iteration, num_learning_iterations):
@@ -221,6 +417,9 @@ class PaperBarrierRunner:
             self.base_env._paper_learning_iteration = iteration
             standard_sum = 0.0
             barrier_sum = 0.0
+            rollout_metric_sums = {}
+            rollout_metric_counts = {}
+            episode_statistics = self._new_episode_statistics()
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
                     transition = self.alg.act(obs, commands, targets)
@@ -229,10 +428,12 @@ class PaperBarrierRunner:
                     dones = dones.to(self.device)
                     dones_float = dones.float()
                     time_outs = infos.get("time_outs")
-                    if time_outs is not None:
+                    if time_outs is None:
+                        time_outs = torch.zeros_like(dones_float)
+                    else:
                         time_outs = time_outs.to(self.device).float()
-                        standard_rewards = standard_rewards + self.alg.gamma * transition["standard_values"] * time_outs
-                        barrier_rewards = barrier_rewards + self.alg.gamma * transition["barrier_values"] * time_outs
+                    standard_rewards = standard_rewards + self.alg.gamma * transition["standard_values"] * time_outs
+                    barrier_rewards = barrier_rewards + self.alg.gamma * transition["barrier_values"] * time_outs
                     self.alg.storage.add(
                         {
                             "proprio": obs,
@@ -252,14 +453,36 @@ class PaperBarrierRunner:
                     )
                     standard_sum += float(standard_rewards.mean())
                     barrier_sum += float(barrier_rewards.mean())
+                    self._accumulate_rollout_diagnostics(rollout_metric_sums, rollout_metric_counts)
+                    barrier_metrics = getattr(self.base_env, "_paper_barrier_metrics", {})
+                    episode_xy_error += barrier_metrics["Tracking/lin_vel_xy_max_abs_error"].to(self.device)
+                    episode_yaw_error += barrier_metrics["Tracking/yaw_rate_error"].to(self.device)
+                    episode_moving_steps += barrier_metrics["Tracking/is_moving_command"].to(self.device)
                     episode_reward += standard_rewards + barrier_rewards
                     episode_length += 1
                     done_ids = torch.nonzero(dones, as_tuple=False).flatten()
                     if done_ids.numel():
+                        self._record_episode_outcomes(
+                            episode_statistics,
+                            done_ids,
+                            time_outs,
+                            episode_reward,
+                            episode_length,
+                            episode_xy_error,
+                            episode_yaw_error,
+                            episode_moving_steps,
+                            episode_terrain_type,
+                            episode_terrain_level,
+                        )
                         reward_buffer.extend(episode_reward[done_ids].cpu().tolist())
                         length_buffer.extend(episode_length[done_ids].cpu().tolist())
                         episode_reward[done_ids] = 0.0
                         episode_length[done_ids] = 0.0
+                        episode_xy_error[done_ids] = 0.0
+                        episode_yaw_error[done_ids] = 0.0
+                        episode_moving_steps[done_ids] = 0.0
+                        episode_terrain_type[done_ids] = terrain.terrain_types[done_ids].to(self.device)
+                        episode_terrain_level[done_ids] = terrain.terrain_levels[done_ids].to(self.device)
                     obs = next_obs.to(self.device)
                     commands = infos["observations"]["commands"].to(self.device)
                     targets = infos["observations"]["estimator_target"].to(self.device)
@@ -271,21 +494,62 @@ class PaperBarrierRunner:
             mean_standard = standard_sum / self.num_steps_per_env
             mean_barrier = barrier_sum / self.num_steps_per_env
             terrain_difficulty = min(1.0, 0.2 + max(0, iteration - 500) / 2500.0 * 0.8)
-            self._log(iteration, total_steps, elapsed, mean_standard, mean_barrier, terrain_difficulty, metrics, reward_buffer, length_buffer)
+            rollout_metrics = self._finalize_rollout_diagnostics(rollout_metric_sums, rollout_metric_counts)
+            rollout_metrics["Terrain/actual_mean_level"] = float(terrain.terrain_levels.float().mean())
+            rollout_metrics["Terrain/actual_max_level"] = float(terrain.terrain_levels.max())
+            episode_metrics = self._finalize_episode_statistics(episode_statistics)
+            self._log(
+                iteration,
+                total_steps,
+                elapsed,
+                mean_standard,
+                mean_barrier,
+                terrain_difficulty,
+                metrics,
+                rollout_metrics,
+                episode_metrics,
+                reward_buffer,
+                length_buffer,
+            )
             if self.log_dir is not None and iteration % self.save_interval == 0:
                 self.save(os.path.join(self.log_dir, f"model_{iteration}.pt"))
             self.current_learning_iteration = iteration + 1
         if self.log_dir is not None:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
 
-    def _log(self, iteration, total_steps, elapsed, standard, barrier, difficulty, metrics, rewards, lengths):
+    def _log(
+        self,
+        iteration,
+        total_steps,
+        elapsed,
+        standard,
+        barrier,
+        difficulty,
+        optimization_metrics,
+        rollout_metrics,
+        episode_metrics,
+        rewards,
+        lengths,
+    ):
         mean_episode_reward = sum(rewards) / len(rewards) if rewards else 0.0
         mean_episode_length = sum(lengths) / len(lengths) if lengths else 0.0
         print(
             f"[PAPER_BARRIER] it={iteration:05d} steps={total_steps} time={elapsed:.2f}s "
             f"standard={standard:.4f} barrier={barrier:.4f} episode={mean_episode_reward:.3f} "
             f"length={mean_episode_length:.1f} terrain={difficulty:.3f} "
-            f"est={metrics['estimator_loss']:.4f} policy={metrics['policy_loss']:.4f}"
+            f"est={optimization_metrics['estimator_loss']:.4f} policy={optimization_metrics['policy_loss']:.4f}"
+        )
+        print(
+            "[PAPER_BARRIER_DIAG] "
+            f"timeout={episode_metrics['Episode/timeout_rate']:.3f} "
+            f"track_success={episode_metrics['Episode/tracking_success_rate']:.3f} "
+            f"vel_xy_err={rollout_metrics.get('Tracking/lin_vel_xy_error', 0.0):.3f} "
+            f"base_contact={rollout_metrics.get('Contact/body_rate', 0.0):.4f} "
+            f"gait_vio={rollout_metrics.get('Diagnostics/gait_violation', 0.0):.3f} "
+            f"clear_vio={rollout_metrics.get('Diagnostics/clearance_violation', 0.0):.3f} "
+            f"level={rollout_metrics.get('Terrain/actual_mean_level', 0.0):.2f} "
+            f"kl={optimization_metrics.get('mean_kl', 0.0):.5f} "
+            f"lr={optimization_metrics.get('learning_rate', 0.0):.6f}"
         )
         if self.writer is None:
             return
@@ -295,12 +559,12 @@ class PaperBarrierRunner:
         self.writer.add_scalar("Train/mean_episode_length", mean_episode_length, iteration)
         self.writer.add_scalar("Curriculum/terrain_difficulty", difficulty, iteration)
         self.writer.add_scalar("Performance/iteration_seconds", elapsed, iteration)
-        for name, value in metrics.items():
+        for name, value in optimization_metrics.items():
             self.writer.add_scalar(f"Loss/{name}", value, iteration)
-        for group_name in ("_paper_standard_metrics", "_paper_barrier_metrics"):
-            group = getattr(self.base_env, group_name, {})
-            for name, value in group.items():
-                self.writer.add_scalar(f"Diagnostics/{name}", float(value.float().mean()), iteration)
+        for name, value in rollout_metrics.items():
+            self.writer.add_scalar(name, value, iteration)
+        for name, value in episode_metrics.items():
+            self.writer.add_scalar(name, value, iteration)
 
     def save(self, path, infos=None):
         torch.save(

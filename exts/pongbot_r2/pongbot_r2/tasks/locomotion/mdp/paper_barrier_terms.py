@@ -1,8 +1,8 @@
 """MDP terms for the R2 reproduction of barrier-based style rewards.
 
-@version 0.0.2
+@version 0.0.3
+@update 2026-07-13: Expose rollout diagnostics for every standard and barrier component.
 @update 2026-07-13: Make gait phase valid during observation-manager shape discovery.
-@update 2026-07-13: Add paper observations, dual rewards, and global terrain curriculum.
 """
 
 from __future__ import annotations
@@ -238,9 +238,10 @@ class PaperStandardReward(ManagerTermBase):
         self.foot_ids = _ordered_body_ids(asset, FOOT_NAMES)
         self.thigh_ids = _ordered_body_ids(asset, THIGH_NAMES)
         self.sensor_foot_ids = _ordered_body_ids_from_sensor(sensor, FOOT_NAMES)
-        self.illegal_sensor_ids = [
-            idx for idx, name in enumerate(sensor.body_names) if name == "BODY" or "THIGH" in name
-        ]
+        self.body_sensor_ids = [idx for idx, name in enumerate(sensor.body_names) if name == "BODY"]
+        self.thigh_sensor_ids = [idx for idx, name in enumerate(sensor.body_names) if "THIGH" in name]
+        self.calf_sensor_ids = [idx for idx, name in enumerate(sensor.body_names) if "CALF" in name]
+        self.illegal_sensor_ids = self.body_sensor_ids + self.thigh_sensor_ids
         self.previous_action = torch.zeros(env.num_envs, asset.num_joints, device=env.device)
         self.previous_previous_action = torch.zeros_like(self.previous_action)
         self.nominal_foot_pos_b: torch.Tensor | None = None
@@ -306,14 +307,39 @@ class PaperStandardReward(ManagerTermBase):
         standard = positive * torch.exp(torch.clamp(0.2 * negative, min=-60.0, max=0.0))
         illegal_force = torch.linalg.norm(sensor.data.net_forces_w[:, self.illegal_sensor_ids], dim=-1)
         illegal_contact = torch.any(illegal_force > 1.0, dim=1)
+        body_force = torch.linalg.norm(sensor.data.net_forces_w[:, self.body_sensor_ids], dim=-1).amax(dim=1)
+        thigh_force = torch.linalg.norm(sensor.data.net_forces_w[:, self.thigh_sensor_ids], dim=-1).amax(dim=1)
+        calf_force = torch.linalg.norm(sensor.data.net_forces_w[:, self.calf_sensor_ids], dim=-1).amax(dim=1)
+        body_contact = body_force > 1.0
+        thigh_contact = thigh_force > 1.0
+        calf_contact = calf_force > 1.0
         standard = standard - 10.0 * illegal_contact.float()
 
         self.previous_previous_action.copy_(self.previous_action)
         self.previous_action.copy_(current_action)
         env._paper_standard_metrics = {
-            "positive": positive.detach(),
-            "negative": negative.detach(),
-            "illegal_contact": illegal_contact.float().detach(),
+            "Diagnostics/positive": positive.detach(),
+            "Diagnostics/negative": negative.detach(),
+            "Diagnostics/illegal_contact": illegal_contact.float().detach(),
+            "StandardPenalty/foot_slip": slip.detach(),
+            "StandardPenalty/joint_torque": torque.detach(),
+            "StandardPenalty/action_rate": smooth_one.detach(),
+            "StandardPenalty/action_acceleration": smooth_two.detach(),
+            "StandardPenalty/foot_position": foot_position.detach(),
+            "StandardPenalty/front_hind_height_difference": height_difference.detach(),
+            "Contact/body_rate": body_contact.float().detach(),
+            "Contact/thigh_rate": thigh_contact.float().detach(),
+            "Contact/calf_rate": calf_contact.float().detach(),
+            "Contact/foot_rate": contacts.mean(dim=1).detach(),
+            "Contact/body_force_max": body_force.detach(),
+            "Contact/thigh_force_max": thigh_force.detach(),
+            "Contact/calf_force_max": calf_force.detach(),
+            "Motion/applied_torque_rms": torch.sqrt(torch.mean(torch.square(asset.data.applied_torque), dim=1)).detach(),
+            "Motion/joint_velocity_rms": torch.sqrt(torch.mean(torch.square(asset.data.joint_vel), dim=1)).detach(),
+            "Motion/action_rms": torch.sqrt(torch.mean(torch.square(current_action), dim=1)).detach(),
+            "Motion/action_rate_rms": torch.sqrt(
+                torch.mean(torch.square(current_action - self.previous_previous_action), dim=1)
+            ).detach(),
         }
         return standard
 
@@ -405,6 +431,24 @@ class PaperBarrierReward(ManagerTermBase):
         base_reward = _bounded_barrier(base_motion, base_lower, base_upper, base_delta).sum(dim=1)
         joint_velocity_reward = _bounded_barrier(asset.data.joint_vel, -8.0, 8.0, 2.0).sum(dim=1)
 
+        joint_position_violation = torch.cat(
+            (
+                (relative_joint_position[:, self.hr_ids] < -math.pi / 6.0)
+                | (relative_joint_position[:, self.hr_ids] > math.pi / 6.0),
+                (relative_joint_position[:, self.hp_ids] < -math.pi / 4.0)
+                | (relative_joint_position[:, self.hp_ids] > math.pi / 4.0),
+                (relative_joint_position[:, self.kn_ids] < -2.0 * math.pi / 5.0)
+                | (relative_joint_position[:, self.kn_ids] > math.pi / 4.0),
+            ),
+            dim=1,
+        )
+        front_height_violation = (front_height < centers[0] - half_width) | (front_height > centers[0] + half_width)
+        hind_height_violation = (hind_height < centers[1] - half_width) | (hind_height > centers[1] + half_width)
+        base_motion_violation = (base_motion < base_lower) | (base_motion > base_upper)
+        active_swing = swing_enforced & ~stand.unsqueeze(1)
+        swing_count = torch.clamp(active_swing.float().sum(dim=1), min=1.0)
+        mean_swing_clearance = torch.sum(torch.where(active_swing, foot_height, 0.0), dim=1) / swing_count
+
         barrier = alpha * (
             gait_reward
             + clearance_reward
@@ -418,12 +462,35 @@ class PaperBarrierReward(ManagerTermBase):
         barrier = torch.nan_to_num(barrier, nan=-1.0e4, posinf=1.0e4, neginf=-1.0e4)
 
         env._paper_barrier_metrics = {
-            "gait_violation": torch.mean((gait_variable < -0.6).float(), dim=1).detach(),
-            "clearance_violation": torch.mean(
+            "Diagnostics/gait_violation": torch.mean((gait_variable < -0.6).float(), dim=1).detach(),
+            "Diagnostics/clearance_violation": torch.mean(
                 ((clearance_variable < -0.08 * scale) & swing_enforced & ~stand.unsqueeze(1)).float(), dim=1
             ).detach(),
-            "velocity_violation": torch.mean((torch.abs(velocity_error) > 0.4).float(), dim=1).detach(),
-            "joint_velocity_violation": torch.mean((torch.abs(asset.data.joint_vel) > 8.0).float(), dim=1).detach(),
+            "Diagnostics/velocity_violation": torch.mean((torch.abs(velocity_error) > 0.4).float(), dim=1).detach(),
+            "Diagnostics/joint_velocity_violation": torch.mean(
+                (torch.abs(asset.data.joint_vel) > 8.0).float(), dim=1
+            ).detach(),
+            "ConstraintViolation/joint_position": joint_position_violation.float().mean(dim=1).detach(),
+            "ConstraintViolation/front_body_height": front_height_violation.float().detach(),
+            "ConstraintViolation/hind_body_height": hind_height_violation.float().detach(),
+            "ConstraintViolation/base_motion": base_motion_violation.float().mean(dim=1).detach(),
+            "BarrierTerm/gait": (alpha * gait_reward).detach(),
+            "BarrierTerm/foot_clearance": (alpha * clearance_reward).detach(),
+            "BarrierTerm/joint_position": (alpha * joint_reward).detach(),
+            "BarrierTerm/front_body_height": (alpha * front_reward).detach(),
+            "BarrierTerm/hind_body_height": (alpha * hind_reward).detach(),
+            "BarrierTerm/target_velocity": (alpha * velocity_reward).detach(),
+            "BarrierTerm/base_motion": (alpha * base_reward).detach(),
+            "BarrierTerm/joint_velocity": (alpha * joint_velocity_reward).detach(),
+            "Tracking/lin_vel_xy_error": torch.linalg.norm(velocity_error[:, :2], dim=1).detach(),
+            "Tracking/lin_vel_xy_max_abs_error": torch.amax(
+                torch.abs(velocity_error[:, :2]), dim=1
+            ).detach(),
+            "Tracking/yaw_rate_error": torch.abs(velocity_error[:, 2]).detach(),
+            "Tracking/command_xy_speed": torch.linalg.norm(commands[:, :2], dim=1).detach(),
+            "Tracking/actual_xy_speed": torch.linalg.norm(asset.data.root_lin_vel_b[:, :2], dim=1).detach(),
+            "Tracking/is_moving_command": (~stand).float().detach(),
+            "Foot/mean_swing_clearance": mean_swing_clearance.detach(),
         }
         return barrier
 

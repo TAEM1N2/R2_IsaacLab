@@ -1,6 +1,17 @@
 # 오류 기록
 
 <details open>
+<summary>2026-07-13 16:36 [E007] [테스트] PaperBarrier helper의 AppLauncher 외부 package import 실패</summary>
+
+- 증상: 순수 episode/rollout metric helper mock test에서 `rsl_rl.runner`를 일반 import하자 `ModuleNotFoundError: omni.kit`으로 중단됨.
+- 원인: `rsl_rl.runner.__init__`가 기존 `OnPolicyRunner`를 함께 import하며, 해당 모듈은 Isaac Sim AppLauncher가 먼저 생성되어야 하는 `omni.kit`에 의존함.
+- 확인: `paper_barrier_runner.py` 파일만 직접 로드한 동일 mock test에서 timeout/early-termination, terrain별 성공률, finite rollout 평균 계산이 모두 통과함.
+- 해결: 순수 helper 검증은 파일 직접 로드를 사용하고, 전체 runner 통합 검증은 AppLauncher를 사용하는 실제 train smoke로 수행하도록 구분함.
+- 관련 파일: `rsl_rl/rsl_rl/runner/paper_barrier_runner.py`
+
+</details>
+
+<details>
 <summary>2026-07-13 15:47 [E006] [IsaacLab] PaperBarrier task 초기화 및 CPU smoke device 불일치</summary>
 
 - 증상: 첫 smoke test는 observation manager 생성 중 `episode_length_buf` 부재로 실패했고, 수정 후 CPU smoke에서는 timeout bootstrap reward와 CUDA value tensor의 device가 달라 실패함.

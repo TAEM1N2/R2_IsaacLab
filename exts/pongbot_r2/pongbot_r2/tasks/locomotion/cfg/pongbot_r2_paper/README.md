@@ -74,3 +74,44 @@ height-difference 항은 보수적으로 각각 1.0을 사용한다. 이는 논�
 `Reward/paper_barrier_per_step`, `Loss/*estimator_loss`,
 `Diagnostics/*violation`, `Diagnostics/illegal_contact`,
 `Curriculum/terrain_difficulty`다.
+
+## 학습 성공 기준과 로그 해석
+
+이 task의 목표는 4초 동안 단순히 넘어지지 않는 것이 아니다. 외부 지형 관측 없이 명령
+속도를 추종하면서, rough terrain에서 trot·foot clearance·body/joint 동작 범위를 지키고
+BODY/THIGH 접촉에 의한 조기 종료 없이 episode를 끝까지 완료하는 것이 목표다. Episode의
+최대 길이는 400 step이므로 평균 길이 300은 최대의 75%이지만, 길이만으로는 정지 policy와
+정상 추종 policy를 구분할 수 없다.
+
+다음 실행부터 터미널에는 기본 요약 다음에 핵심 진단 한 줄이 추가된다.
+
+```text
+[PAPER_BARRIER_DIAG] timeout=... track_success=... vel_xy_err=... base_contact=...
+                     gait_vio=... clear_vio=... level=... kl=... lr=...
+```
+
+TensorBoard에서는 다음 순서로 판단한다.
+
+1. `Episode/timeout_rate`: 1에 가까워져야 한다. 4초를 채운 episode 비율이다.
+2. `Episode/early_termination_rate`: 0에 가까워져야 한다. BODY/THIGH 접촉 종료 비율이다.
+3. `Episode/tracking_success_rate`: timeout이면서 episode 평균 XY 성분 최대 절대오차와 yaw 오차가
+   각각 0.4 이하인 비율이다. 논문의 축별 barrier 범위와 같은 기준이다.
+4. `Tracking/moving_lin_vel_xy_error`: 이동 명령 환경의 XY 속도 오차이며 낮아져야 한다.
+5. `Tracking/stationary_xy_speed`: 정지 명령 환경의 미끄러짐·떨림 속도이며 0에 가까워야 한다.
+6. `Contact/body_rate`, `Contact/thigh_rate`: rollout 전체 contact 비율이며 0에 가까워야 한다.
+7. `TerrainSuccess/*_timeout_rate`, `TerrainSuccess/*_tracking_rate`: terrain 종류별 생존·추종 성공률이다.
+8. `Terrain/actual_mean_level`: 실제 표본 terrain level이다. 예약된 난도인
+   `Curriculum/terrain_difficulty`와 구분해서 본다.
+9. `Diagnostics/*violation`, `ConstraintViolation/*`: gait, clearance, joint, body height,
+   base motion 제약 위반율이며 낮아져야 한다.
+10. `BarrierTerm/*`: barrier 총합이 악화될 때 어떤 제약 항이 원인인지 찾는 데 사용한다.
+11. `StandardPenalty/*`, `Motion/*`: slip, torque, action rate/acceleration과 실제 RMS 움직임을
+    함께 보고 sim-to-real regularization이 과도하거나 약한지 판단한다.
+12. `Loss/mean_kl`, `Loss/clip_fraction`, `Loss/*explained_variance`,
+    `Loss/gradient_norm_pre_clip`, `Loss/learning_rate`: PPO 최적화 안정성을 판단한다. KL은 설정값
+    0.01 주변, explained variance는 1 방향이 바람직하며 LR이 상한에 계속 붙는지 확인한다.
+
+기존 `Diagnostics/*`는 마지막 simulation step만 기록했지만, 새 로그는 환경 400개 × 400 step
+전체를 누적한 rollout 평균이다. `Train/mean_episode_length`는 최근 100개 episode의 이동 평균으로
+유지하고, `Episode/mean_length_current`는 해당 iteration에서 끝난 모든 episode의 평균을 나타낸다.
+초기 episode 길이를 무작위화하므로 iteration 0의 episode 통계는 참고만 하고 이후 추세를 본다.
