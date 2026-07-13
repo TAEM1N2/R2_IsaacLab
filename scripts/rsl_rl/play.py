@@ -1,4 +1,9 @@
-"""Script to play a checkpoint if an RL agent from RSL-RL."""
+"""Play RSL-RL checkpoints with PongBot diagnostics and controls.
+
+@version 0.0.2
+@update 2026-07-13: Select the paper-barrier runner for its isolated task.
+@update 2026-07-12: Apply the training-time dilated-history contract during play.
+"""
 
 """Launch Isaac Sim Simulator first."""
 
@@ -134,7 +139,7 @@ except ImportError:
     Node = None
     Float32MultiArray = None
 
-from rsl_rl.runner import OnPolicyRunner
+from rsl_rl.runner import OnPolicyRunner, PaperBarrierRunner
 
 from isaaclab.envs import ManagerBasedRLEnvCfg,DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.dict import print_dict
@@ -519,7 +524,14 @@ def main():
     # env = RslRlVecEnvWrapper(env)
     # load previously trained model
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-    ppo_runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    runner_classes = {
+        "OnPolicyRunner": OnPolicyRunner,
+        "PaperBarrierRunner": PaperBarrierRunner,
+    }
+    runner_type = getattr(agent_cfg, "runner_type", "OnPolicyRunner")
+    if runner_type not in runner_classes:
+        raise ValueError(f"Unsupported runner_type={runner_type!r}; available={tuple(runner_classes)}")
+    ppo_runner = runner_classes[runner_type](env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     _load_play_checkpoint_forgiving(ppo_runner, resume_path)
 
     # obtain the trained policy for inference

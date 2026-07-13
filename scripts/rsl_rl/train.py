@@ -1,4 +1,8 @@
-"""Script to train RL agent with RSL-RL."""
+"""Script to train RL agents with the workspace RSL-RL runners.
+
+@version 0.0.1
+@update 2026-07-13: Select the isolated paper-barrier runner from task configuration.
+"""
 
 """Launch Isaac Sim Simulator first."""
 import importlib
@@ -102,7 +106,7 @@ import torch
 from datetime import datetime
 
 # from rsl_rl.runners import OnPolicyRunner
-from rsl_rl.runner import OnPolicyRunner
+from rsl_rl.runner import OnPolicyRunner, PaperBarrierRunner
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -176,7 +180,14 @@ def main():
     # runner: OnPolicyRunner | OnPolicyRunnerMlp = on_policy_runner_class(
     #     env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device
     # )
-    runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    runner_classes = {
+        "OnPolicyRunner": OnPolicyRunner,
+        "PaperBarrierRunner": PaperBarrierRunner,
+    }
+    runner_type = getattr(agent_cfg, "runner_type", "OnPolicyRunner")
+    if runner_type not in runner_classes:
+        raise ValueError(f"Unsupported runner_type={runner_type!r}; available={tuple(runner_classes)}")
+    runner = runner_classes[runner_type](env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
 
     # write git state to logs
     # runner.add_git_repo_to_log(__file__)

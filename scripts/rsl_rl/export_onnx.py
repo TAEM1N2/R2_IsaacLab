@@ -1,4 +1,8 @@
-"""Export a trained RSL-RL checkpoint to ONNX files."""
+"""Export trained workspace RSL-RL checkpoints to ONNX files.
+
+@version 0.0.1
+@update 2026-07-13: Select the isolated paper-barrier runner from task configuration.
+"""
 
 import argparse
 import importlib
@@ -49,7 +53,7 @@ _register_local_extensions()
 
 import gymnasium as gym
 
-from rsl_rl.runner import OnPolicyRunner
+from rsl_rl.runner import OnPolicyRunner, PaperBarrierRunner
 
 from isaaclab.envs import DirectMARLEnv, ManagerBasedRLEnvCfg, multi_agent_to_single_agent
 from isaaclab_tasks.utils import parse_env_cfg
@@ -72,7 +76,14 @@ def main():
         env = multi_agent_to_single_agent(env)
     env = RslRlVecEnvWrapper(env)
 
-    runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    runner_classes = {
+        "OnPolicyRunner": OnPolicyRunner,
+        "PaperBarrierRunner": PaperBarrierRunner,
+    }
+    runner_type = getattr(agent_cfg, "runner_type", "OnPolicyRunner")
+    if runner_type not in runner_classes:
+        raise ValueError(f"Unsupported runner_type={runner_type!r}; available={tuple(runner_classes)}")
+    runner = runner_classes[runner_type](env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     runner.load(checkpoint_path)
 
     export_mlp_as_onnx(
