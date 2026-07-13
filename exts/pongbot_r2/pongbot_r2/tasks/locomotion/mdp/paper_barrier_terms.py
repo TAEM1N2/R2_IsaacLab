@@ -1,8 +1,8 @@
 """MDP terms for the R2 reproduction of barrier-based style rewards.
 
-@version 0.0.5
+@version 0.0.6
+@update 2026-07-13: Add progress-gated rough-terrain sampling and persistent calf-support suppression.
 @update 2026-07-13: Read explicit R2 actuator limits and retain the latest applied action in policy history.
-@update 2026-07-13: Expose rollout diagnostics for every standard and barrier component.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import torch
 
 import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation
+from isaaclab.envs.mdp import UniformVelocityCommand, reset_joints_by_offset, reset_root_state_uniform
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 from isaaclab.sensors import ContactSensor, RayCaster
 
@@ -31,6 +32,149 @@ FOOT_SCANNER_NAMES = (
     "rl_foot_scanner",
     "rr_foot_scanner",
 )
+PAPER_ROLE_ANCHOR = 0
+PAPER_ROLE_FRONTIER = 1
+PAPER_ROLE_PROBE = 2
+
+
+def _as_env_ids(env: ManagerBasedRLEnv, env_ids: Sequence[int] | slice | None) -> torch.Tensor:
+    """Return environment indices as a one-dimensional device tensor."""
+    all_ids = torch.arange(env.num_envs, device=env.device)
+    if env_ids is None:
+        return all_ids
+    if isinstance(env_ids, slice):
+        return all_ids[env_ids]
+    return torch.as_tensor(env_ids, device=env.device, dtype=torch.long).view(-1)
+
+
+def _paper_hard_reset_mask(env: ManagerBasedRLEnv, env_ids: torch.Tensor) -> torch.Tensor:
+    """Select probe and mature-frontier environments for full reset disturbances."""
+    roles = getattr(env, "_paper_curriculum_role", None)
+    competence = getattr(env, "_paper_competence_level", None)
+    if roles is None or competence is None:
+        return torch.zeros(env_ids.numel(), dtype=torch.bool, device=env.device)
+    return (roles[env_ids] == PAPER_ROLE_PROBE) | (
+        (roles[env_ids] == PAPER_ROLE_FRONTIER) & (competence[env_ids] >= 7)
+    )
+
+
+class PaperVelocityCommand(UniformVelocityCommand):
+    """Sample moderate discovery commands while retaining full-range probe environments."""
+
+    def _resample_command(self, env_ids: Sequence[int]):
+        super()._resample_command(env_ids)
+        ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long).view(-1)
+        if ids.numel() == 0:
+            return
+
+        roles = getattr(self._env, "_paper_curriculum_role", None)
+        competence = getattr(self._env, "_paper_competence_level", None)
+        if roles is None or competence is None:
+            roles = torch.full((self.num_envs,), PAPER_ROLE_FRONTIER, device=self.device, dtype=torch.long)
+            competence = torch.full((self.num_envs,), 3, device=self.device, dtype=torch.long)
+
+        discovery_mask = roles[ids] != PAPER_ROLE_PROBE
+        discovery_ids = ids[discovery_mask]
+        if discovery_ids.numel() == 0:
+            return
+
+        # Frontier commands expand smoothly from a forward-biased discovery range
+        # to the paper's full omnidirectional range as terrain competence grows.
+        progress = torch.clamp((competence[discovery_ids].float() - 3.0) / 7.0, 0.0, 1.0)
+        progress = torch.where(
+            roles[discovery_ids] == PAPER_ROLE_ANCHOR,
+            torch.zeros_like(progress),
+            progress,
+        )
+        random = torch.rand(discovery_ids.numel(), 3, device=self.device)
+        lower = torch.stack(
+            (
+                0.25 + progress * (-1.0 - 0.25),
+                -0.20 + progress * (-1.0 + 0.20),
+                -0.30 + progress * (-1.0 + 0.30),
+            ),
+            dim=1,
+        )
+        upper = torch.stack(
+            (
+                0.80 + progress * (1.50 - 0.80),
+                0.20 + progress * (1.0 - 0.20),
+                0.30 + progress * (1.0 - 0.30),
+            ),
+            dim=1,
+        )
+        self.vel_command_b[discovery_ids] = lower + random * (upper - lower)
+
+
+def paper_reset_root_state_curriculum(
+    env: ManagerBasedRLEnv,
+    env_ids: Sequence[int] | slice | None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> None:
+    """Use mild discovery resets while preserving full disturbance probes."""
+    ids = _as_env_ids(env, env_ids)
+    hard_mask = _paper_hard_reset_mask(env, ids)
+    mild_ids = ids[~hard_mask]
+    hard_ids = ids[hard_mask]
+    pose_range = {"x": (-0.25, 0.25), "y": (-0.25, 0.25), "yaw": (-math.pi, math.pi)}
+    if mild_ids.numel():
+        reset_root_state_uniform(
+            env,
+            mild_ids,
+            pose_range=pose_range,
+            velocity_range={
+                "x": (-0.2, 0.2),
+                "y": (-0.2, 0.2),
+                "z": (-0.1, 0.1),
+                "roll": (-0.2, 0.2),
+                "pitch": (-0.2, 0.2),
+                "yaw": (-0.2, 0.2),
+            },
+            asset_cfg=asset_cfg,
+        )
+    if hard_ids.numel():
+        reset_root_state_uniform(
+            env,
+            hard_ids,
+            pose_range=pose_range,
+            velocity_range={
+                "x": (-1.0, 1.0),
+                "y": (-0.5, 0.5),
+                "z": (-0.5, 0.5),
+                "roll": (-0.7, 0.7),
+                "pitch": (-0.7, 0.7),
+                "yaw": (-0.7, 0.7),
+            },
+            asset_cfg=asset_cfg,
+        )
+
+
+def paper_reset_joints_curriculum(
+    env: ManagerBasedRLEnv,
+    env_ids: Sequence[int] | slice | None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> None:
+    """Use small joint-state perturbations except on robustness probes."""
+    ids = _as_env_ids(env, env_ids)
+    hard_mask = _paper_hard_reset_mask(env, ids)
+    mild_ids = ids[~hard_mask]
+    hard_ids = ids[hard_mask]
+    if mild_ids.numel():
+        reset_joints_by_offset(
+            env,
+            mild_ids,
+            position_range=(-0.10, 0.10),
+            velocity_range=(-0.5, 0.5),
+            asset_cfg=asset_cfg,
+        )
+    if hard_ids.numel():
+        reset_joints_by_offset(
+            env,
+            hard_ids,
+            position_range=(-0.20, 0.20),
+            velocity_range=(-2.5, 2.5),
+            asset_cfg=asset_cfg,
+        )
 
 
 def _episode_phase_time(env: ManagerBasedRLEnv) -> torch.Tensor:
@@ -246,6 +390,9 @@ class PaperStandardReward(ManagerTermBase):
         self.illegal_sensor_ids = self.body_sensor_ids + self.thigh_sensor_ids
         self.previous_action = torch.zeros(env.num_envs, asset.num_joints, device=env.device)
         self.previous_previous_action = torch.zeros_like(self.previous_action)
+        self.calf_contact_duration = torch.zeros(
+            env.num_envs, len(self.calf_sensor_ids), device=env.device
+        )
         self.nominal_foot_pos_b: torch.Tensor | None = None
         legs_actuator = asset.actuators.get("legs")
         if legs_actuator is None:
@@ -264,6 +411,7 @@ class PaperStandardReward(ManagerTermBase):
             env_ids = slice(None)
         self.previous_action[env_ids] = 0.0
         self.previous_previous_action[env_ids] = 0.0
+        self.calf_contact_duration[env_ids] = 0.0
 
     def __call__(
         self,
@@ -325,10 +473,20 @@ class PaperStandardReward(ManagerTermBase):
         body_force = torch.linalg.norm(sensor.data.net_forces_w[:, self.body_sensor_ids], dim=-1).amax(dim=1)
         thigh_force = torch.linalg.norm(sensor.data.net_forces_w[:, self.thigh_sensor_ids], dim=-1).amax(dim=1)
         calf_force = torch.linalg.norm(sensor.data.net_forces_w[:, self.calf_sensor_ids], dim=-1).amax(dim=1)
+        calf_forces = torch.linalg.norm(sensor.data.net_forces_w[:, self.calf_sensor_ids], dim=-1)
         body_contact = body_force > 1.0
         thigh_contact = thigh_force > 1.0
         calf_contact = calf_force > 1.0
+        loaded_calf_contact = calf_forces > 10.0
+        self.calf_contact_duration = torch.where(
+            loaded_calf_contact,
+            self.calf_contact_duration + env.step_dt,
+            torch.zeros_like(self.calf_contact_duration),
+        )
+        persistent_calf_support = self.calf_contact_duration > 0.12
+        calf_support_penalty = -0.25 * persistent_calf_support.float().sum(dim=1)
         standard = standard - 10.0 * illegal_contact.float()
+        standard = standard + calf_support_penalty
 
         self.previous_previous_action.copy_(self.previous_action)
         self.previous_action.copy_(current_action)
@@ -342,14 +500,19 @@ class PaperStandardReward(ManagerTermBase):
             "StandardPenalty/action_acceleration": smooth_two.detach(),
             "StandardPenalty/foot_position": foot_position.detach(),
             "StandardPenalty/front_hind_height_difference": height_difference.detach(),
+            "StandardPenalty/calf_support": calf_support_penalty.detach(),
             "Contact/body_rate": body_contact.float().detach(),
             "Contact/thigh_rate": thigh_contact.float().detach(),
             "Contact/calf_rate": calf_contact.float().detach(),
+            "Contact/calf_persistent_rate": persistent_calf_support.float().mean(dim=1).detach(),
+            "Contact/calf_max_duration": self.calf_contact_duration.amax(dim=1).detach(),
             "Contact/foot_rate": contacts.mean(dim=1).detach(),
             "Contact/body_force_max": body_force.detach(),
             "Contact/thigh_force_max": thigh_force.detach(),
             "Contact/calf_force_max": calf_force.detach(),
-            "Motion/applied_torque_rms": torch.sqrt(torch.mean(torch.square(asset.data.applied_torque), dim=1)).detach(),
+            "Motion/applied_torque_rms": torch.sqrt(
+                torch.mean(torch.square(asset.data.applied_torque), dim=1)
+            ).detach(),
             "Motion/torque_usage_rms": torch.sqrt(torch.mean(torch.square(torque_usage), dim=1)).detach(),
             "Motion/effort_limit_min": torch.amin(self.effort_limits, dim=1).detach(),
             "Motion/effort_limit_max": torch.amax(self.effort_limits, dim=1).detach(),
@@ -376,6 +539,25 @@ class PaperBarrierReward(ManagerTermBase):
         self.hp_ids = _ordered_joint_ids(asset, "HP_JOINT")
         self.kn_ids = _ordered_joint_ids(asset, "KN_JOINT")
         self.phase_offsets = torch.tensor((0.0, 0.5, 0.5, 0.0), device=env.device)
+        self.asset = asset
+        self.episode_moving_error_sum = torch.zeros(env.num_envs, device=env.device)
+        self.episode_moving_steps = torch.zeros(env.num_envs, device=env.device)
+        self.episode_commanded_distance = torch.zeros(env.num_envs, device=env.device)
+        self.episode_projected_progress = torch.zeros(env.num_envs, device=env.device)
+        self.previous_root_pos_w = asset.data.root_pos_w[:, :2].clone()
+        env._paper_episode_moving_error_sum = self.episode_moving_error_sum
+        env._paper_episode_moving_steps = self.episode_moving_steps
+        env._paper_episode_commanded_distance = self.episode_commanded_distance
+        env._paper_episode_projected_progress = self.episode_projected_progress
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        self.episode_moving_error_sum[env_ids] = 0.0
+        self.episode_moving_steps[env_ids] = 0.0
+        self.episode_commanded_distance[env_ids] = 0.0
+        self.episode_projected_progress[env_ids] = 0.0
+        self.previous_root_pos_w[env_ids] = self.asset.data.root_pos_w[env_ids, :2]
 
     def __call__(
         self,
@@ -438,6 +620,28 @@ class PaperBarrierReward(ManagerTermBase):
             (asset.data.root_lin_vel_b[:, 0], asset.data.root_lin_vel_b[:, 1], asset.data.root_ang_vel_b[:, 2]),
             dim=1,
         )
+        traversal_command = torch.linalg.norm(commands[:, :2], dim=1) >= 0.2
+        max_xy_error = torch.amax(torch.abs(velocity_error[:, :2]), dim=1)
+        command_b = torch.cat((commands[:, :2], torch.zeros_like(commands[:, :1])), dim=1)
+        command_w = math_utils.quat_apply_yaw(asset.data.root_quat_w, command_b)[:, :2]
+        command_direction_w = command_w / torch.clamp(
+            torch.linalg.norm(command_w, dim=1, keepdim=True), min=1.0e-6
+        )
+        root_displacement_w = asset.data.root_pos_w[:, :2] - self.previous_root_pos_w
+        projected_progress = torch.sum(root_displacement_w * command_direction_w, dim=1)
+        self.episode_moving_error_sum += torch.where(
+            traversal_command, max_xy_error, torch.zeros_like(max_xy_error)
+        )
+        self.episode_moving_steps += traversal_command.float()
+        self.episode_commanded_distance += torch.where(
+            traversal_command,
+            torch.linalg.norm(commands[:, :2], dim=1) * env.step_dt,
+            torch.zeros_like(max_xy_error),
+        )
+        self.episode_projected_progress += torch.where(
+            traversal_command, projected_progress, torch.zeros_like(projected_progress)
+        )
+        self.previous_root_pos_w.copy_(asset.data.root_pos_w[:, :2])
         velocity_reward = _bounded_barrier(velocity_error, -0.4, 0.4, 0.2).sum(dim=1)
         base_motion = torch.stack(
             (asset.data.root_ang_vel_b[:, 0], asset.data.root_ang_vel_b[:, 1], asset.data.root_lin_vel_b[:, 2]),
@@ -508,49 +712,154 @@ class PaperBarrierReward(ManagerTermBase):
             "Tracking/command_xy_speed": torch.linalg.norm(commands[:, :2], dim=1).detach(),
             "Tracking/actual_xy_speed": torch.linalg.norm(asset.data.root_lin_vel_b[:, :2], dim=1).detach(),
             "Tracking/is_moving_command": (~stand).float().detach(),
+            "Tracking/is_traversal_command": traversal_command.float().detach(),
             "Foot/mean_swing_clearance": mean_swing_clearance.detach(),
         }
         return barrier
 
 
 class PaperTerrainDifficultyCurriculum(ManagerTermBase):
-    """Expand the globally available terrain rows without success-based demotion."""
+    """Maintain anchor/frontier/probe terrain roles using moving traversal success."""
 
     def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
+        env_ids = torch.arange(env.num_envs, device=env.device)
+        role_bucket = torch.remainder(env_ids, 10)
+        self.roles = torch.where(
+            role_bucket < 3,
+            torch.full_like(role_bucket, PAPER_ROLE_ANCHOR),
+            torch.where(
+                role_bucket < 8,
+                torch.full_like(role_bucket, PAPER_ROLE_FRONTIER),
+                torch.full_like(role_bucket, PAPER_ROLE_PROBE),
+            ),
+        )
+        self.competence = torch.full((env.num_envs,), 3, device=env.device, dtype=torch.long)
+        self.last_progress_ratio = torch.zeros(env.num_envs, device=env.device)
+        self.last_mean_error = torch.zeros(env.num_envs, device=env.device)
+        self.last_success = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._paper_curriculum_role = self.roles
+        env._paper_competence_level = self.competence
+        env._paper_curriculum_term = self
 
     def __call__(
         self,
         env: ManagerBasedRLEnv,
         env_ids: Sequence[int],
-        initial_difficulty: float,
-        ramp_start_iteration: int,
-        ramp_end_iteration: int,
-    ) -> dict[str, float]:
+        anchor_max_level: int,
+        probe_min_level: int,
+        success_progress_ratio: float,
+        failure_progress_ratio: float,
+        success_mean_error: float,
+        failure_mean_error: float,
+    ) -> torch.Tensor:
         terrain = env.scene.terrain
         if terrain.terrain_origins is None:
-            return {"difficulty": 0.0, "max_level": 0.0}
+            return torch.zeros((), device=env.device)
 
-        env_ids_tensor = torch.as_tensor(env_ids, device=env.device, dtype=torch.long).view(-1)
+        env_ids_tensor = _as_env_ids(env, env_ids)
         if env_ids_tensor.numel() == 0:
-            return {"difficulty": 0.0, "max_level": 0.0}
+            return torch.zeros((), device=env.device)
 
-        iteration = int(getattr(env, "_paper_learning_iteration", 0))
-        if iteration <= ramp_start_iteration:
-            difficulty = initial_difficulty
-        elif iteration >= ramp_end_iteration:
-            difficulty = 1.0
-        else:
-            fraction = (iteration - ramp_start_iteration) / (ramp_end_iteration - ramp_start_iteration)
-            difficulty = initial_difficulty + fraction * (1.0 - initial_difficulty)
+        if getattr(env, "_paper_calibrating", False):
+            sampled_levels = torch.zeros_like(env_ids_tensor)
+            terrain.terrain_levels[env_ids_tensor] = sampled_levels
+            terrain.env_origins[env_ids_tensor] = terrain.terrain_origins[
+                sampled_levels, terrain.terrain_types[env_ids_tensor]
+            ]
+            return torch.zeros((), device=env.device)
 
-        max_level = max(0, min(terrain.max_terrain_level - 1, round(difficulty * (terrain.max_terrain_level - 1))))
-        sampled_levels = torch.randint(0, max_level + 1, (env_ids_tensor.numel(),), device=env.device)
+        max_level = terrain.max_terrain_level - 1
+        moving_steps = getattr(env, "_paper_episode_moving_steps", None)
+        error_sum = getattr(env, "_paper_episode_moving_error_sum", None)
+        commanded_distance = getattr(env, "_paper_episode_commanded_distance", None)
+        projected_progress = getattr(env, "_paper_episode_projected_progress", None)
+        if (
+            moving_steps is not None
+            and error_sum is not None
+            and commanded_distance is not None
+            and projected_progress is not None
+        ):
+            ids = env_ids_tensor
+            expected_distance = torch.clamp(commanded_distance[ids], min=0.1)
+            progress_ratio = projected_progress[ids] / expected_distance
+            mean_error = error_sum[ids] / torch.clamp(moving_steps[ids], min=1.0)
+            traversal_episode = moving_steps[ids] >= 0.5 * torch.clamp(
+                env.episode_length_buf[ids].float(), min=1.0
+            )
+            timeout = env.termination_manager.time_outs[ids]
+            success = (
+                traversal_episode
+                & timeout
+                & (progress_ratio >= success_progress_ratio)
+                & (mean_error <= success_mean_error)
+            )
+            failure = traversal_episode & (
+                (~timeout)
+                | (progress_ratio < failure_progress_ratio)
+                | (mean_error > failure_mean_error)
+            )
+            frontier = self.roles[ids] == PAPER_ROLE_FRONTIER
+            delta = success.long() - failure.long()
+            self.competence[ids] = torch.where(
+                frontier,
+                torch.clamp(self.competence[ids] + delta, min=1, max=max_level),
+                self.competence[ids],
+            )
+            self.last_progress_ratio[ids] = progress_ratio
+            self.last_mean_error[ids] = mean_error
+            self.last_success[ids] = success
+
+        roles = self.roles[env_ids_tensor]
+        anchor = roles == PAPER_ROLE_ANCHOR
+        frontier = roles == PAPER_ROLE_FRONTIER
+        num_ids = env_ids_tensor.numel()
+        anchor_levels = torch.randint(
+            0,
+            min(anchor_max_level, max_level) + 1,
+            (num_ids,),
+            device=env.device,
+        )
+        frontier_levels = torch.clamp(
+            self.competence[env_ids_tensor]
+            + torch.randint(-1, 2, (num_ids,), device=env.device),
+            min=0,
+            max=max_level,
+        )
+        probe_lower = torch.clamp(
+            self.competence[env_ids_tensor] + 2,
+            min=min(probe_min_level, max_level),
+            max=max_level,
+        )
+        probe_width = (max_level - probe_lower + 1).float()
+        probe_levels = probe_lower + torch.floor(torch.rand_like(probe_width) * probe_width).long()
+        sampled_levels = torch.where(
+            anchor,
+            anchor_levels,
+            torch.where(frontier, frontier_levels, probe_levels),
+        )
+
         terrain.terrain_levels[env_ids_tensor] = sampled_levels
         terrain.env_origins[env_ids_tensor] = terrain.terrain_origins[
             sampled_levels, terrain.terrain_types[env_ids_tensor]
         ]
-        return {"difficulty": float(difficulty), "max_level": float(max_level)}
+        return terrain.terrain_levels.float().mean()
+
+    def state_dict(self) -> dict[str, torch.Tensor]:
+        """Return curriculum state for checkpoint continuation."""
+        return {
+            "competence": self.competence.detach().cpu().clone(),
+            "last_progress_ratio": self.last_progress_ratio.detach().cpu().clone(),
+            "last_mean_error": self.last_mean_error.detach().cpu().clone(),
+        }
+
+    def load_state_dict(self, state: dict[str, torch.Tensor]) -> None:
+        """Restore curriculum state when shapes match the current environment count."""
+        for name in ("competence", "last_progress_ratio", "last_mean_error"):
+            value = state.get(name)
+            target = getattr(self, name)
+            if value is not None and value.shape == target.shape:
+                target.copy_(value.to(device=target.device, dtype=target.dtype))
 
 
 __all__ = [
@@ -560,6 +869,9 @@ __all__ = [
     "PaperProprioception",
     "PaperStandardReward",
     "PaperTerrainDifficultyCurriculum",
+    "PaperVelocityCommand",
+    "paper_reset_joints_curriculum",
+    "paper_reset_root_state_curriculum",
     "paper_estimator_target",
     "relaxed_log_barrier",
 ]

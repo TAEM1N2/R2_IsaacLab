@@ -1,10 +1,11 @@
 """Runner for the isolated R2 barrier-reward paper task.
 
-@version 0.0.11
+@version 0.0.12
+@update 2026-07-13: Log moving traversal competence and checkpoint the R2 terrain curriculum.
 @update 2026-07-13: Restore calibrated terrain assignments and enforce the R2 rough-trot training contract.
-@update 2026-07-13: Save independent optimizer states and report fixed full-range rough terrain.
 """
 
+import math
 import os
 import time
 from collections import Counter, deque
@@ -92,6 +93,7 @@ class PaperBarrierRunner:
         with torch.inference_mode():
             asset = self.base_env.scene["robot"]
             terrain = self.base_env.scene.terrain
+            self.base_env._paper_calibrating = True
             env_ids = torch.arange(self.base_env.num_envs, device=self.base_env.device)
             original_terrain_levels = None
             if terrain.terrain_origins is not None:
@@ -158,7 +160,11 @@ class PaperBarrierRunner:
 
             forces = torch.cat(force_samples, dim=0)
             stance_forces = forces[forces > 1.0]
-            stance_force = torch.median(stance_forces) if stance_forces.numel() else torch.tensor(10.0, device=self.device)
+            stance_force = (
+                torch.median(stance_forces)
+                if stance_forces.numel()
+                else torch.tensor(10.0, device=self.device)
+            )
             # Simulation contact labels should retain light TIP touches. A small
             # morphology-calibrated threshold avoids the former ~29-N dead zone.
             contact_force_on = torch.clamp(0.03 * stance_force, 1.0, 5.0)
@@ -179,6 +185,7 @@ class PaperBarrierRunner:
                 "foot_radius": 0.03,
                 "settling_steps": steps,
             }
+            self.base_env._paper_calibrating = False
             if original_terrain_levels is not None:
                 terrain.terrain_levels.copy_(original_terrain_levels)
                 terrain.env_origins[:] = terrain.terrain_origins[
@@ -278,14 +285,50 @@ class PaperBarrierRunner:
         contact_force_on = float(self.calibration["contact_force_on"])
         if not 1.0 <= contact_force_on <= 5.0:
             raise RuntimeError(f"PaperBarrier TIP contact threshold is invalid: {contact_force_on} N.")
+        action_cfg = self.base_env.cfg.actions.joint_pos
+        if not isinstance(action_cfg.scale, (int, float)) or float(action_cfg.scale) != 0.25:
+            raise RuntimeError(f"PaperBarrier expected an R2 action scale of 0.25, got {action_cfg.scale}.")
+        if action_cfg.clip != {".*": (-2.0, 2.0)}:
+            raise RuntimeError(f"PaperBarrier expected raw action clipping [-2, 2], got {action_cfg.clip}.")
+        curriculum_term = getattr(self.base_env, "_paper_curriculum_term", None)
+        if curriculum_term is None:
+            raise RuntimeError("PaperBarrier competence curriculum was not initialized.")
+        roles = curriculum_term.roles
+        if roles.shape != (self.base_env.num_envs,) or set(torch.unique(roles).cpu().tolist()) != {
+            0,
+            1,
+            2,
+        }:
+            raise RuntimeError("PaperBarrier expected non-empty anchor/frontier/probe curriculum roles.")
+        expected_roles = torch.remainder(
+            torch.arange(self.base_env.num_envs, device=roles.device), 10
+        )
+        expected_roles = torch.where(
+            expected_roles < 3,
+            torch.zeros_like(expected_roles),
+            torch.where(expected_roles < 8, torch.ones_like(expected_roles), 2 * torch.ones_like(expected_roles)),
+        )
+        if not torch.equal(roles, expected_roles):
+            raise RuntimeError("PaperBarrier curriculum role assignment does not match the 30/50/20 contract.")
+        policy_cfg = self.cfg["policy"]
+        algorithm_cfg = self.cfg["algorithm"]
+        if float(policy_cfg["init_noise_std"]) != 0.4 or not math.isclose(
+            float(policy_cfg["logstd_max"]), math.log(0.6), rel_tol=0.0, abs_tol=1.0e-8
+        ):
+            raise RuntimeError("PaperBarrier expected initial/max action std 0.4/0.6.")
+        if float(algorithm_cfg["learning_rate_max"]) != 1.0e-3:
+            raise RuntimeError("PaperBarrier actor learning-rate cap must remain 1e-3.")
         clearance_lower_bound = 0.07 * float(self.calibration["length_scale"])
+        role_fractions = [float((roles == role).float().mean()) for role in range(3)]
         print(
             "[PAPER_BARRIER] contract: "
             f"terrain_level_mean={float(levels.float().mean()):.2f}, "
             f"terrain_level_max={int(levels.max())}, columns={actual_columns}, "
             f"effort_limits_nm={unique_effort_limits.detach().cpu().tolist()}, "
             f"tip_contact_threshold_n={contact_force_on:.2f}, "
-            f"clearance_lower_bound_m={clearance_lower_bound:.3f}"
+            f"clearance_lower_bound_m={clearance_lower_bound:.3f}, "
+            f"curriculum_role_fractions={role_fractions}, "
+            "action_scale_rad=0.25, action_clip=[-2, 2], action_std=0.4(max=0.6)"
         )
 
     @staticmethod
@@ -348,13 +391,22 @@ class PaperBarrierRunner:
             "yaw_error_sum",
             "moving_count",
             "moving_success",
+            "traversal_count",
+            "traversal_success",
             "stationary_count",
             "stationary_success",
             "level_sum",
         )
         statistics = {name: torch.zeros((), device=self.device) for name in scalar_names}
         num_columns = len(self.terrain_column_names)
-        for name in ("terrain_count", "terrain_timeout", "terrain_tracking_success", "terrain_length_sum"):
+        for name in (
+            "terrain_count",
+            "terrain_timeout",
+            "terrain_tracking_success",
+            "terrain_traversal_count",
+            "terrain_traversal_success",
+            "terrain_length_sum",
+        ):
             statistics[name] = torch.zeros(num_columns, device=self.device)
         return statistics
 
@@ -368,6 +420,7 @@ class PaperBarrierRunner:
         episode_xy_error: torch.Tensor,
         episode_yaw_error: torch.Tensor,
         episode_moving_steps: torch.Tensor,
+        episode_traversal_steps: torch.Tensor,
         episode_terrain_type: torch.Tensor,
         episode_terrain_level: torch.Tensor,
     ) -> None:
@@ -381,6 +434,7 @@ class PaperBarrierRunner:
         timeout = time_outs[done_ids] > 0.5
         tracking_success = timeout & (xy_error <= 0.4) & (yaw_error <= 0.4)
         moving_episode = episode_moving_steps[done_ids] >= 0.5 * lengths
+        traversal_episode = episode_traversal_steps[done_ids] >= 0.5 * lengths
         terrain_types = episode_terrain_type[done_ids].long().clamp(0, len(self.terrain_column_names) - 1)
         ones = torch.ones_like(lengths)
 
@@ -393,6 +447,8 @@ class PaperBarrierRunner:
         statistics["yaw_error_sum"] += yaw_error.sum()
         statistics["moving_count"] += moving_episode.float().sum()
         statistics["moving_success"] += (tracking_success & moving_episode).float().sum()
+        statistics["traversal_count"] += traversal_episode.float().sum()
+        statistics["traversal_success"] += (tracking_success & traversal_episode).float().sum()
         statistics["stationary_count"] += (~moving_episode).float().sum()
         statistics["stationary_success"] += (tracking_success & ~moving_episode).float().sum()
         statistics["level_sum"] += episode_terrain_level[done_ids].float().sum()
@@ -411,6 +467,16 @@ class PaperBarrierRunner:
             weights=tracking_success.float(),
             minlength=len(self.terrain_column_names),
         )
+        statistics["terrain_traversal_count"] += torch.bincount(
+            terrain_types,
+            weights=traversal_episode.float(),
+            minlength=len(self.terrain_column_names),
+        )
+        statistics["terrain_traversal_success"] += torch.bincount(
+            terrain_types,
+            weights=(tracking_success & traversal_episode).float(),
+            minlength=len(self.terrain_column_names),
+        )
         statistics["terrain_length_sum"] += torch.bincount(
             terrain_types,
             weights=lengths,
@@ -422,12 +488,16 @@ class PaperBarrierRunner:
         count = torch.clamp(statistics["count"], min=1.0)
         moving_count = torch.clamp(statistics["moving_count"], min=1.0)
         stationary_count = torch.clamp(statistics["stationary_count"], min=1.0)
+        traversal_count = torch.clamp(statistics["traversal_count"], min=1.0)
         metrics = {
             "Episode/completed_count": float(statistics["count"]),
             "Episode/timeout_rate": float(statistics["timeout"] / count),
             "Episode/early_termination_rate": float(1.0 - statistics["timeout"] / count),
             "Episode/tracking_success_rate": float(statistics["tracking_success"] / count),
             "Episode/moving_tracking_success_rate": float(statistics["moving_success"] / moving_count),
+            "Episode/traversal_tracking_success_rate": float(
+                statistics["traversal_success"] / traversal_count
+            ),
             "Episode/stationary_tracking_success_rate": float(
                 statistics["stationary_success"] / stationary_count
             ),
@@ -450,6 +520,13 @@ class PaperBarrierRunner:
             )
             metrics[f"TerrainSuccess/{terrain_name}_tracking_rate"] = float(
                 statistics["terrain_tracking_success"][indices].sum() / terrain_count
+            )
+            terrain_traversal_count = torch.clamp(
+                statistics["terrain_traversal_count"][indices].sum(), min=1.0
+            )
+            metrics[f"TerrainSuccess/{terrain_name}_moving_tracking_rate"] = float(
+                statistics["terrain_traversal_success"][indices].sum()
+                / terrain_traversal_count
             )
             metrics[f"TerrainEpisode/{terrain_name}_mean_length"] = float(
                 statistics["terrain_length_sum"][indices].sum() / terrain_count
@@ -474,6 +551,7 @@ class PaperBarrierRunner:
         episode_xy_error = torch.zeros(self.env.num_envs, device=self.device)
         episode_yaw_error = torch.zeros(self.env.num_envs, device=self.device)
         episode_moving_steps = torch.zeros(self.env.num_envs, device=self.device)
+        episode_traversal_steps = torch.zeros(self.env.num_envs, device=self.device)
         terrain = self.base_env.scene.terrain
         episode_terrain_type = terrain.terrain_types.to(self.device).clone()
         episode_terrain_level = terrain.terrain_levels.to(self.device).clone()
@@ -533,6 +611,9 @@ class PaperBarrierRunner:
                     episode_xy_error += barrier_metrics["Tracking/lin_vel_xy_max_abs_error"].to(self.device)
                     episode_yaw_error += barrier_metrics["Tracking/yaw_rate_error"].to(self.device)
                     episode_moving_steps += barrier_metrics["Tracking/is_moving_command"].to(self.device)
+                    episode_traversal_steps += barrier_metrics["Tracking/is_traversal_command"].to(
+                        self.device
+                    )
                     episode_reward += raw_standard_rewards + raw_barrier_rewards
                     episode_length += 1
                     done_ids = torch.nonzero(dones, as_tuple=False).flatten()
@@ -546,6 +627,7 @@ class PaperBarrierRunner:
                             episode_xy_error,
                             episode_yaw_error,
                             episode_moving_steps,
+                            episode_traversal_steps,
                             episode_terrain_type,
                             episode_terrain_level,
                         )
@@ -556,6 +638,7 @@ class PaperBarrierRunner:
                         episode_xy_error[done_ids] = 0.0
                         episode_yaw_error[done_ids] = 0.0
                         episode_moving_steps[done_ids] = 0.0
+                        episode_traversal_steps[done_ids] = 0.0
                         episode_terrain_type[done_ids] = terrain.terrain_types[done_ids].to(self.device)
                         episode_terrain_level[done_ids] = terrain.terrain_levels[done_ids].to(self.device)
                     obs = next_obs.to(self.device)
@@ -563,6 +646,10 @@ class PaperBarrierRunner:
                     targets = infos["observations"]["estimator_target"].to(self.device)
 
                 self.alg.compute_returns(obs, commands, targets)
+            episode_metrics = self._finalize_episode_statistics(episode_statistics)
+            self.alg.set_locomotion_success(
+                episode_metrics.get("Episode/traversal_tracking_success_rate", 0.0)
+            )
             metrics = self.alg.update()
             total_steps += self.env.num_envs * self.num_steps_per_env
             elapsed = time.time() - start
@@ -574,7 +661,21 @@ class PaperBarrierRunner:
             rollout_metrics = self._finalize_rollout_diagnostics(rollout_metric_sums, rollout_metric_counts)
             rollout_metrics["Terrain/actual_mean_level"] = float(terrain.terrain_levels.float().mean())
             rollout_metrics["Terrain/actual_max_level"] = float(terrain.terrain_levels.max())
-            episode_metrics = self._finalize_episode_statistics(episode_statistics)
+            curriculum_term = getattr(self.base_env, "_paper_curriculum_term", None)
+            if curriculum_term is not None:
+                frontier = curriculum_term.roles == 1
+                rollout_metrics["Curriculum/frontier_mean_competence"] = float(
+                    curriculum_term.competence[frontier].float().mean()
+                )
+                rollout_metrics["Curriculum/frontier_last_success_rate"] = float(
+                    curriculum_term.last_success[frontier].float().mean()
+                )
+                rollout_metrics["Curriculum/anchor_fraction"] = float(
+                    (curriculum_term.roles == 0).float().mean()
+                )
+                rollout_metrics["Curriculum/probe_fraction"] = float(
+                    (curriculum_term.roles == 2).float().mean()
+                )
             self._log(
                 iteration,
                 total_steps,
@@ -632,11 +733,17 @@ class PaperBarrierRunner:
             "[PAPER_BARRIER_DIAG]\n"
             f"  timeout_rate              : {episode_metrics['Episode/timeout_rate']:.3f}\n"
             f"  tracking_success_rate     : {episode_metrics['Episode/tracking_success_rate']:.3f}\n"
+            f"  moving_tracking_success   : {episode_metrics['Episode/moving_tracking_success_rate']:.3f}\n"
+            f"  traversal_success         : {episode_metrics['Episode/traversal_tracking_success_rate']:.3f}\n"
             f"  lin_vel_xy_error          : {rollout_metrics.get('Tracking/lin_vel_xy_error', 0.0):.3f}\n"
+            f"  actual_xy_speed           : {rollout_metrics.get('Tracking/actual_xy_speed', 0.0):.3f}\n"
+            f"  swing_clearance_m         : {rollout_metrics.get('Foot/mean_swing_clearance', 0.0):.3f}\n"
             f"  body_contact_rate         : {rollout_metrics.get('Contact/body_rate', 0.0):.4f}\n"
+            f"  persistent_calf_rate      : {rollout_metrics.get('Contact/calf_persistent_rate', 0.0):.3f}\n"
             f"  gait_violation_rate       : {rollout_metrics.get('Diagnostics/gait_violation', 0.0):.3f}\n"
             f"  clearance_violation_rate  : {rollout_metrics.get('Diagnostics/clearance_violation', 0.0):.3f}\n"
             f"  actual_mean_terrain_level : {rollout_metrics.get('Terrain/actual_mean_level', 0.0):.2f}\n"
+            f"  frontier_competence       : {rollout_metrics.get('Curriculum/frontier_mean_competence', 0.0):.2f}\n"
             f"  mean_kl                   : {optimization_metrics.get('mean_kl', 0.0):.5f}\n"
             f"  learning_rate             : {optimization_metrics.get('learning_rate', 0.0):.6f}"
         )
@@ -667,6 +774,11 @@ class PaperBarrierRunner:
                 "optimizer_state_dicts": self.alg.optimizer_state_dict(),
                 "iter": self.current_learning_iteration,
                 "calibration": self.calibration,
+                "curriculum_state_dict": (
+                    self.base_env._paper_curriculum_term.state_dict()
+                    if hasattr(self.base_env, "_paper_curriculum_term")
+                    else None
+                ),
                 "infos": infos,
             },
             path,
@@ -687,6 +799,10 @@ class PaperBarrierRunner:
         self.current_learning_iteration = checkpoint.get("iter", 0)
         self.calibration = checkpoint.get("calibration", self.calibration)
         self._restore_calibration(self.calibration)
+        curriculum_state = checkpoint.get("curriculum_state_dict")
+        curriculum_term = getattr(self.base_env, "_paper_curriculum_term", None)
+        if curriculum_state is not None and curriculum_term is not None:
+            curriculum_term.load_state_dict(curriculum_state)
         return checkpoint.get("infos")
 
     def _restore_calibration(self, calibration: dict) -> None:

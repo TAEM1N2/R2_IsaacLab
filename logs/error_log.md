@@ -1,6 +1,17 @@
 # 오류 기록
 
 <details open>
+<summary>2026-07-13 21:47 [E010] [IsaacLab] PaperBarrier full-range 학습의 이동 성공률 정체</summary>
+
+- 증상: run `2026-07-13_20-49-49`의 iteration 175에서 command/actual XY speed는 `0.744/0.299 m/s`, 이동 명령 추종 성공률은 `2.74%`, swing clearance는 `1.07 cm`, calf contact는 `43.5%`였음. 평균 terrain level은 약 5였지만 이는 성공에 따른 승급이 아니라 고정 full-range 표본이었음.
+- 원인: 기존 task는 scratch policy에 level 0~10 terrain, full command와 강한 reset을 처음부터 동일하게 적용했고, R2 action scale은 `0.1 rad`였음. 동시에 actor action std가 `1.0`, adaptive learning rate가 `0.00296`까지 유지됐으며 지속 CALF 지지를 직접 억제하는 항과 성공 기반 terrain 승급 조건이 없었음.
+- 확인: 같은 iteration에서 timeout rate `57.6%`, hind-height violation `72.0%`, PPO KL `0.01355`, clip fraction `19.2%`를 TensorBoard에서 확인함. 수정된 PPO 전체 update, 이동/정지 episode 지표, anchor/frontier/probe 표본과 승강급, checkpoint 상태 복사, fail-fast 설정 계약의 독립 테스트를 통과함.
+- 해결: R2 residual scale을 `0.25 rad`와 raw action `[-2, 2]`로 구성하되 초기/최대 action std를 `0.4/0.6`, actor learning-rate 상한을 `1e-3`으로 제한함. terrain을 anchor/frontier/probe `30/50/20%`로 나누고 명령 방향 진행률과 이동 오차로 frontier를 승강급하며, command/reset 강도도 competence와 함께 확장함. 10 N CALF 접촉이 0.12초 이상 지속될 때만 지지 패널티를 적용함.
+- 관련 파일: `exts/pongbot_r2/pongbot_r2/tasks/locomotion/mdp/paper_barrier_terms.py`, `exts/pongbot_r2/pongbot_r2/tasks/locomotion/cfg/pongbot_r2_paper/paper_env_cfg.py`, `exts/pongbot_r2/pongbot_r2/tasks/locomotion/cfg/pongbot_r2_paper/paper_rsl_rl_cfg.py`, `rsl_rl/rsl_rl/algorithm/paper_barrier_ppo.py`, `rsl_rl/rsl_rl/runner/paper_barrier_runner.py`
+
+</details>
+
+<details>
 <summary>2026-07-13 20:41 [E009] [IsaacLab] PaperBarrier terrain level 0 고정 및 torque 정규화 무효</summary>
 
 - 증상: rough-trot scratch run의 iteration 0~255에서 `Terrain/actual_mean_level=0`이 유지됐고, applied torque RMS는 약 28~31 Nm인데 `Motion/torque_usage_rms`는 약 `3e-8`, torque penalty는 약 `1e-14`였음.

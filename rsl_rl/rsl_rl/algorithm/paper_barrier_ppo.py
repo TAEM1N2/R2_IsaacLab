@@ -1,8 +1,8 @@
 """Dual-advantage PPO used by the barrier-style paper reproduction.
 
-@version 0.0.4
+@version 0.0.5
+@update 2026-07-13: Bound actor adaptation and transition from tracking discovery to balanced barrier control.
 @update 2026-07-13: Separate actor, dual-critic, and estimator optimization with value-scale normalization.
-@update 2026-07-13: Log KL, clipping, critic explained variance, and pre-clip gradient norm.
 """
 
 import torch
@@ -26,6 +26,8 @@ class PaperBarrierPPO:
         self.lam = cfg.get("lam", 0.95)
         self.max_grad_norm = cfg.get("max_grad_norm", 1.0)
         self.learning_rate = cfg.get("learning_rate", 1.0e-3)
+        self.learning_rate_min = cfg.get("learning_rate_min", 1.0e-5)
+        self.learning_rate_max = cfg.get("learning_rate_max", 1.0e-3)
         self.standard_critic_learning_rate = cfg.get(
             "standard_critic_learning_rate", self.learning_rate
         )
@@ -35,7 +37,17 @@ class PaperBarrierPPO:
         self.estimator_learning_rate = cfg.get("estimator_learning_rate", self.learning_rate)
         self.value_scale_min = cfg.get("value_scale_min", 1.0)
         self.desired_kl = cfg.get("desired_kl", 0.01)
+        self.kl_upper_factor = cfg.get("kl_upper_factor", 1.5)
+        self.kl_lower_factor = cfg.get("kl_lower_factor", 0.5)
         self.schedule = cfg.get("schedule", "adaptive")
+        self.initial_standard_advantage_weight = cfg.get(
+            "initial_standard_advantage_weight", 0.6
+        )
+        self.final_standard_advantage_weight = cfg.get(
+            "final_standard_advantage_weight", 0.5
+        )
+        self.advantage_transition_success = cfg.get("advantage_transition_success", 0.3)
+        self.locomotion_success = 0.0
 
         self.actor_parameters = tuple(actor_critic.actor.parameters()) + (actor_critic.logstd,)
         self.standard_critic_parameters = tuple(actor_critic.standard_critic.parameters())
@@ -59,6 +71,21 @@ class PaperBarrierPPO:
         self.storage = PaperBarrierStorage(
             num_envs, num_steps, proprio_dim, command_dim, target_dim, action_dim, self.device
         )
+
+    def set_locomotion_success(self, success_rate: float) -> None:
+        """Set the latest moving-command success used by the advantage curriculum."""
+        self.locomotion_success = min(max(float(success_rate), 0.0), 1.0)
+
+    def _advantage_weights(self) -> tuple[float, float]:
+        """Return tracking-first weights that converge to the paper's balanced mixture."""
+        fraction = min(
+            self.locomotion_success / max(self.advantage_transition_success, 1.0e-6),
+            1.0,
+        )
+        standard_weight = self.initial_standard_advantage_weight + fraction * (
+            self.final_standard_advantage_weight - self.initial_standard_advantage_weight
+        )
+        return standard_weight, 1.0 - standard_weight
 
     @torch.no_grad()
     def act(self, proprio: torch.Tensor, commands: torch.Tensor, targets: torch.Tensor):
@@ -112,9 +139,12 @@ class PaperBarrierPPO:
             "estimator_gradient_norm_pre_clip": 0.0,
             "standard_value_scale": 0.0,
             "barrier_value_scale": 0.0,
+            "standard_advantage_weight": 0.0,
+            "barrier_advantage_weight": 0.0,
             "action_std_mean": 0.0,
         }
         updates = 0
+        standard_advantage_weight, barrier_advantage_weight = self._advantage_weights()
         for batch in self.storage.mini_batches(self.num_mini_batches, self.num_learning_epochs):
             actor_input = torch.cat(
                 (batch["proprio"], batch["commands"], batch["estimated_targets"]), dim=1
@@ -135,7 +165,10 @@ class PaperBarrierPPO:
                     dim=-1,
                 ).mean()
                 clip_fraction = torch.mean((torch.abs(ratio - 1.0) > self.clip_param).float())
-            mixed_advantage = 0.5 * batch["standard_advantages"] + 0.5 * batch["barrier_advantages"]
+            mixed_advantage = (
+                standard_advantage_weight * batch["standard_advantages"]
+                + barrier_advantage_weight * batch["barrier_advantages"]
+            )
             surrogate = -mixed_advantage * ratio
             surrogate_clipped = -mixed_advantage * torch.clamp(
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
@@ -205,10 +238,10 @@ class PaperBarrierPPO:
 
             if self.desired_kl is not None and self.schedule == "adaptive":
                 with torch.no_grad():
-                    if kl > 2.0 * self.desired_kl:
-                        self.learning_rate = max(1.0e-5, self.learning_rate / 1.5)
-                    elif 0.0 < kl < 0.5 * self.desired_kl:
-                        self.learning_rate = min(1.0e-2, self.learning_rate * 1.5)
+                    if kl > self.kl_upper_factor * self.desired_kl:
+                        self.learning_rate = max(self.learning_rate_min, self.learning_rate / 1.5)
+                    elif 0.0 < kl < self.kl_lower_factor * self.desired_kl:
+                        self.learning_rate = min(self.learning_rate_max, self.learning_rate * 1.5)
                     for group in self.actor_optimizer.param_groups:
                         group["lr"] = self.learning_rate
 
@@ -233,6 +266,8 @@ class PaperBarrierPPO:
                 estimator_gradient_norm,
                 standard_value_scale,
                 barrier_value_scale,
+                torch.as_tensor(standard_advantage_weight, device=self.device),
+                torch.as_tensor(barrier_advantage_weight, device=self.device),
                 new_std.mean(),
             )
             for key, value in zip(totals, values):

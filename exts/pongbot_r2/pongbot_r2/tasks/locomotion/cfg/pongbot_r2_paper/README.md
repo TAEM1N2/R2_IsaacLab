@@ -12,7 +12,8 @@ python scripts/rsl_rl/train.py \
 ```
 
 기본 설정은 400개 환경, 환경당 400 step(총 160,000 sample), 100 Hz 제어,
-4초 episode, 최대 10,000 iteration이다. 12개 관절의 action scale은 0.1 rad이다.
+4초 episode, 최대 10,000 iteration이다. 12개 관절의 action scale은 0.25 rad이며 raw action을
+`[-2, 2]`로 제한해 최대 residual을 `±0.5 rad`로 제한한다.
 
 ## 학습 카메라
 
@@ -39,7 +40,8 @@ python scripts/rsl_rl/train.py \
 - estimator 출력: body linear velocity 3, terrain-relative foot height 4, contact probability 4
 - critic 입력: actor와 같은 proprioception/command에 실제 11차원 privileged target을 결합
 - critic은 standard reward와 barrier reward용으로 각각 하나씩 사용한다.
-- 두 reward는 별도 GAE와 advantage 정규화를 거친 뒤 actor에서 `0.5 / 0.5`로 결합한다.
+- 두 reward는 별도 GAE와 advantage 정규화를 거친다. 평면 traversal 성공률 0에서는
+  standard/barrier를 `0.60/0.40`으로 결합하고, 성공률 30%에서 논문의 `0.50/0.50`으로 복귀한다.
 - actor, standard critic, barrier critic, estimator는 optimizer와 gradient clipping을 공유하지 않는다.
 - 두 critic은 raw value를 예측하되 각 rollout return 표준편차로 value loss와 value clip 폭을
   독립 정규화한다.
@@ -72,10 +74,24 @@ bumpy 25%, slope up/down 각 12.5%, stairs up/down 각 12.5%다. 논문이 공�
 terrain column은 16개이며 flat/bumpy에 각각 4개, slope/stairs의 상승·하강에 각각 2개를
 배정한다. 따라서 위 비율을 column 반올림 없이 정확히 구현한다.
 
-논문은 rough-trot policy에 대한 난도 curriculum을 명시하지 않았으므로 기존의 임의
-iteration ramp를 제거했다. 시작부터 0~100% terrain row를 400개 병렬 환경에 분산해 사용하며,
-`Terrain/configured_max_difficulty`는 1.0이다. runner는 학습 전에 terrain level이 둘 이상의
-row에 분산됐는지 검사하며, calibration 뒤 level 0에 고정되면 즉시 중단한다.
+논문은 rough-trot policy에 대한 난도 curriculum을 명시하지 않았지만, R2 full-range scratch
+run은 생존만 늘고 이동 성공률이 약 2%에 머물렀다. 험지 traversal을 우선하는 R2 adaptation은
+환경 역할을 다음처럼 고정해 level 0 붕괴와 쉬운 지형 과적합을 함께 방지한다.
+
+- anchor 30%: level 0~2를 계속 제공해 기본 trot를 보존한다.
+- frontier 50%: 환경별 competence 주변 `L-1~L+1`을 표본한다. 초기 competence는 3이다.
+- probe 20%: competence보다 최소 2단계 높은 level 5~10을 계속 표본한다.
+
+Frontier 승급은 평면 속도 명령이 episode 절반 이상 유지되고, timeout, 진행률 50% 이상,
+episode 평균 축별 XY 속도 오차 0.4 이하를 모두 만족할 때만 일어난다. 조기 종료, 진행률 20%
+미만 또는 오차 0.8 초과는 한 단계 강등한다. Standing과 제자리 회전 표본은 terrain competence를
+바꾸지 않는다. 진행률은 단순 이동 거리의 크기가 아니라 매 step의 이동을 당시 명령 방향에
+투영해 누적한 값/명령 거리다. 따라서 뒤로 밀리거나 옆으로 표류한 거리를 성공으로 계산하지 않는다.
+`Terrain/configured_max_difficulty`는 probe가 항상 full range에 접근하므로 1.0이다.
+
+Anchor/frontier의 초기 command는 `vx=0.25~0.8 m/s`, `vy=±0.2 m/s`, `wz=±0.3 rad/s`이며,
+frontier competence 3~10에 따라 원래 full range로 확장된다. Probe는 처음부터 full command와
+강한 reset disturbance를 사용한다. Frontier level 7 이상도 강한 disturbance를 사용한다.
 
 ## 재현 가정
 
@@ -99,13 +115,27 @@ torque regularization은 R2 actuator limit(HR/HP 120 Nm, knee 320 Nm)으로 torq
 R2의 calibration scale이 1.057이면 기준점은 약 15.9 cm지만 실제 constraint lower bound는
 `15.9-8.5=7.4 cm`다. 15.9 cm 전체가 강제 최소 clearance는 아니다.
 
-기존 coupled-optimizer checkpoint의 model weight는 읽을 수 있지만 optimizer state는 새 구조와
-호환되지 않는다. 이 변경의 본 학습 비교는 checkpoint 재개가 아니라 scratch run으로 수행한다.
+Paper action scale 0.1 rad는 R2의 기존 정상 task 0.25 rad, implicit task 0.5 rad보다 작아
+full-range run에서 실제 residual RMS가 약 0.076 rad에 머물렀다. R2 adaptation은 scale을
+0.25 rad로 올리되 initial action std를 `1.0→0.4`로 낮춰 초기 물리 noise를 동일한 0.1 rad로
+유지한다. std 상한은 0.6, entropy coefficient는 0.005다. Actor adaptive learning rate 상한은
+`1e-3`이며 KL 0.015를 넘으면 감소한다.
+
+BODY/THIGH 접촉 종료는 유지한다. CALF는 계단 모서리와의 순간 충돌을 허용하되, 10 N을 넘는
+접촉이 0.12초 이상 계속되면 다리당 `-0.25/step`을 적용하고 전체 penalty를 `-1.0/step`으로
+제한한다. 따라서 장애물 접촉 후 다리를 빼는 동작은 허용하면서 calf를 지지대로 쓰는 정책은
+억제한다.
+
+기존 action scale 0.1/full-range checkpoint는 observation과 action 의미가 달라 새 R2 adaptation에
+재개하지 않는다. 본 학습은 scratch run으로 수행한다. 새 checkpoint에는 environment별 frontier
+competence도 함께 저장한다.
 
 주요 TensorBoard 항목은 `Reward/paper_standard_per_step`,
 `Reward/paper_barrier_per_step`, `Loss/*estimator_loss`,
 `Diagnostics/*violation`, `Diagnostics/illegal_contact`,
-`Terrain/actual_mean_level`이다. `Reward/*`와 `Train/mean_episode_reward`는 순수 환경 reward이며,
+`Terrain/actual_mean_level`, `Curriculum/frontier_mean_competence`,
+`Episode/moving_tracking_success_rate`, `TerrainSuccess/*_moving_tracking_rate`,
+`Contact/calf_persistent_rate`다. `Reward/*`와 `Train/mean_episode_reward`는 순수 환경 reward이며,
 timeout critic bootstrap을 포함한 PPO 입력은 `TrainingReward/*`로 별도 기록한다.
 
 ## 학습 성공 기준과 로그 해석
@@ -153,6 +183,7 @@ TensorBoard에서는 다음 순서로 판단한다.
 5. `Tracking/stationary_xy_speed`: 정지 명령 환경의 미끄러짐·떨림 속도이며 0에 가까워야 한다.
 6. `Contact/body_rate`, `Contact/thigh_rate`: rollout 전체 contact 비율이며 0에 가까워야 한다.
 7. `TerrainSuccess/*_timeout_rate`, `TerrainSuccess/*_tracking_rate`: terrain 종류별 생존·추종 성공률이다.
+   `TerrainSuccess/*_moving_tracking_rate`는 standing을 제외한 실제 traversal 판단에 사용한다.
 8. `Terrain/actual_mean_level`: full-range terrain에서 실제 표본된 평균 row다.
 9. `Diagnostics/*violation`, `ConstraintViolation/*`: gait, clearance, joint, body height,
    base motion 제약 위반율이며 낮아져야 한다.
