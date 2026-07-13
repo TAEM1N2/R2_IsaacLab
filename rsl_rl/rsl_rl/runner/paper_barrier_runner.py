@@ -1,8 +1,8 @@
 """Runner for the isolated R2 barrier-reward paper task.
 
-@version 0.0.8
+@version 0.0.9
+@update 2026-07-13: Print each PaperBarrier terminal metric on its own labeled line.
 @update 2026-07-13: Log rollout, episode-outcome, terrain-specific, and optimization diagnostics.
-@update 2026-07-13: Record rollout-time estimator features for stationary PPO inputs.
 """
 
 import os
@@ -534,22 +534,29 @@ class PaperBarrierRunner:
         mean_episode_reward = sum(rewards) / len(rewards) if rewards else 0.0
         mean_episode_length = sum(lengths) / len(lengths) if lengths else 0.0
         print(
-            f"[PAPER_BARRIER] it={iteration:05d} steps={total_steps} time={elapsed:.2f}s "
-            f"standard={standard:.4f} barrier={barrier:.4f} episode={mean_episode_reward:.3f} "
-            f"length={mean_episode_length:.1f} terrain={difficulty:.3f} "
-            f"est={optimization_metrics['estimator_loss']:.4f} policy={optimization_metrics['policy_loss']:.4f}"
+            "\n[PAPER_BARRIER]\n"
+            f"  iteration                 : {iteration:05d}\n"
+            f"  total_steps               : {total_steps}\n"
+            f"  iteration_time_s          : {elapsed:.2f}\n"
+            f"  standard_reward_per_step  : {standard:.4f}\n"
+            f"  barrier_reward_per_step   : {barrier:.4f}\n"
+            f"  mean_episode_reward       : {mean_episode_reward:.3f}\n"
+            f"  mean_episode_length       : {mean_episode_length:.1f}\n"
+            f"  terrain_difficulty        : {difficulty:.3f}\n"
+            f"  estimator_loss            : {optimization_metrics['estimator_loss']:.4f}\n"
+            f"  policy_loss               : {optimization_metrics['policy_loss']:.4f}"
         )
         print(
-            "[PAPER_BARRIER_DIAG] "
-            f"timeout={episode_metrics['Episode/timeout_rate']:.3f} "
-            f"track_success={episode_metrics['Episode/tracking_success_rate']:.3f} "
-            f"vel_xy_err={rollout_metrics.get('Tracking/lin_vel_xy_error', 0.0):.3f} "
-            f"base_contact={rollout_metrics.get('Contact/body_rate', 0.0):.4f} "
-            f"gait_vio={rollout_metrics.get('Diagnostics/gait_violation', 0.0):.3f} "
-            f"clear_vio={rollout_metrics.get('Diagnostics/clearance_violation', 0.0):.3f} "
-            f"level={rollout_metrics.get('Terrain/actual_mean_level', 0.0):.2f} "
-            f"kl={optimization_metrics.get('mean_kl', 0.0):.5f} "
-            f"lr={optimization_metrics.get('learning_rate', 0.0):.6f}"
+            "[PAPER_BARRIER_DIAG]\n"
+            f"  timeout_rate              : {episode_metrics['Episode/timeout_rate']:.3f}\n"
+            f"  tracking_success_rate     : {episode_metrics['Episode/tracking_success_rate']:.3f}\n"
+            f"  lin_vel_xy_error          : {rollout_metrics.get('Tracking/lin_vel_xy_error', 0.0):.3f}\n"
+            f"  body_contact_rate         : {rollout_metrics.get('Contact/body_rate', 0.0):.4f}\n"
+            f"  gait_violation_rate       : {rollout_metrics.get('Diagnostics/gait_violation', 0.0):.3f}\n"
+            f"  clearance_violation_rate  : {rollout_metrics.get('Diagnostics/clearance_violation', 0.0):.3f}\n"
+            f"  actual_mean_terrain_level : {rollout_metrics.get('Terrain/actual_mean_level', 0.0):.2f}\n"
+            f"  mean_kl                   : {optimization_metrics.get('mean_kl', 0.0):.5f}\n"
+            f"  learning_rate             : {optimization_metrics.get('learning_rate', 0.0):.6f}"
         )
         if self.writer is None:
             return
