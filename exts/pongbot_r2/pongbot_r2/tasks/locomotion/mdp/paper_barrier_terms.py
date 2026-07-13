@@ -1,7 +1,7 @@
 """MDP terms for the R2 reproduction of barrier-based style rewards.
 
-@version 0.0.4
-@update 2026-07-13: Normalize standard torque regularization by the R2 actuator effort limits.
+@version 0.0.5
+@update 2026-07-13: Read explicit R2 actuator limits and retain the latest applied action in policy history.
 @update 2026-07-13: Expose rollout diagnostics for every standard and barrier component.
 """
 
@@ -176,7 +176,9 @@ class PaperProprioception(ManagerTermBase):
         phase_sin = torch.where(stand, torch.zeros_like(phase_sin), phase_sin)
         phase_cos = torch.where(stand, torch.zeros_like(phase_cos), phase_cos)
 
-        desired_relative = self.desired_history[:, [1, 2]] - asset.data.default_joint_pos.unsqueeze(1)
+        # action_manager.action is the action most recently applied to the simulation.
+        # Keep it and the action before it, matching the paper's previous-action observation.
+        desired_relative = self.desired_history[:, [0, 1]] - asset.data.default_joint_pos.unsqueeze(1)
         sparse_errors = self.error_history[:, [2, 4, 6]]
         sparse_velocities = self.velocity_history[:, [2, 4, 6]] * 0.05
         feet_b = _foot_positions_b(asset, self.foot_ids)
@@ -245,10 +247,13 @@ class PaperStandardReward(ManagerTermBase):
         self.previous_action = torch.zeros(env.num_envs, asset.num_joints, device=env.device)
         self.previous_previous_action = torch.zeros_like(self.previous_action)
         self.nominal_foot_pos_b: torch.Tensor | None = None
-        effort_limits = getattr(asset.data, "joint_effort_limits", None)
+        legs_actuator = asset.actuators.get("legs")
+        if legs_actuator is None:
+            raise RuntimeError("PaperStandardReward requires the R2 'legs' actuator group.")
+        effort_limits = getattr(legs_actuator, "effort_limit", None)
         if effort_limits is None or effort_limits.shape != self.previous_action.shape:
             raise RuntimeError(
-                "PaperStandardReward requires per-environment joint_effort_limits matching applied torque."
+                "PaperStandardReward requires per-environment R2 actuator effort limits matching applied torque."
             )
         if not torch.isfinite(effort_limits).all() or not torch.all(effort_limits > 0.0):
             raise RuntimeError("PaperStandardReward received non-positive or non-finite joint effort limits.")
@@ -346,6 +351,8 @@ class PaperStandardReward(ManagerTermBase):
             "Contact/calf_force_max": calf_force.detach(),
             "Motion/applied_torque_rms": torch.sqrt(torch.mean(torch.square(asset.data.applied_torque), dim=1)).detach(),
             "Motion/torque_usage_rms": torch.sqrt(torch.mean(torch.square(torque_usage), dim=1)).detach(),
+            "Motion/effort_limit_min": torch.amin(self.effort_limits, dim=1).detach(),
+            "Motion/effort_limit_max": torch.amax(self.effort_limits, dim=1).detach(),
             "Motion/joint_velocity_rms": torch.sqrt(torch.mean(torch.square(asset.data.joint_vel), dim=1)).detach(),
             "Motion/action_rms": torch.sqrt(torch.mean(torch.square(current_action), dim=1)).detach(),
             "Motion/action_rate_rms": torch.sqrt(

@@ -1,8 +1,8 @@
 """Terrain distribution for the R2 barrier-reward paper task.
 
-@version 0.0.2
+@version 0.0.3
+@update 2026-07-13: Use 16 terrain columns so every configured rough-trot proportion is represented exactly.
 @update 2026-07-13: Restrict the paper task to rough-trot terrain without high-step boxes.
-@update 2026-07-13: Add flat-to-rough terrain rows matching the paper's reported limits.
 """
 
 import math
@@ -23,7 +23,7 @@ PAPER_BARRIER_ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     size=(8.0, 8.0),
     border_width=20.0,
     num_rows=11,
-    num_cols=10,
+    num_cols=16,
     horizontal_scale=0.05,
     vertical_scale=0.005,
     slope_threshold=0.75,

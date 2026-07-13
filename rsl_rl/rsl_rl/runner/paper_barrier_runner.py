@@ -1,13 +1,13 @@
 """Runner for the isolated R2 barrier-reward paper task.
 
-@version 0.0.10
+@version 0.0.11
+@update 2026-07-13: Restore calibrated terrain assignments and enforce the R2 rough-trot training contract.
 @update 2026-07-13: Save independent optimizer states and report fixed full-range rough terrain.
-@update 2026-07-13: Print each PaperBarrier terminal metric on its own labeled line.
 """
 
 import os
 import time
-from collections import deque
+from collections import Counter, deque
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -34,6 +34,7 @@ class PaperBarrierRunner:
         self.base_env = self._find_base_env(env)
         self.calibration = self._calibrate_robot(train_cfg.get("calibration_steps", 100))
         self.terrain_column_names = self._terrain_column_names()
+        self._validate_training_contract()
 
         obs, extras = env.get_observations()
         observations = extras["observations"]
@@ -92,7 +93,9 @@ class PaperBarrierRunner:
             asset = self.base_env.scene["robot"]
             terrain = self.base_env.scene.terrain
             env_ids = torch.arange(self.base_env.num_envs, device=self.base_env.device)
+            original_terrain_levels = None
             if terrain.terrain_origins is not None:
+                original_terrain_levels = terrain.terrain_levels.clone()
                 terrain.terrain_levels[env_ids] = 0
                 terrain.env_origins[env_ids] = terrain.terrain_origins[
                     terrain.terrain_levels[env_ids], terrain.terrain_types[env_ids]
@@ -156,7 +159,9 @@ class PaperBarrierRunner:
             forces = torch.cat(force_samples, dim=0)
             stance_forces = forces[forces > 1.0]
             stance_force = torch.median(stance_forces) if stance_forces.numel() else torch.tensor(10.0, device=self.device)
-            contact_force_on = torch.clamp(0.15 * stance_force, 1.0, 50.0)
+            # Simulation contact labels should retain light TIP touches. A small
+            # morphology-calibrated threshold avoids the former ~29-N dead zone.
+            contact_force_on = torch.clamp(0.03 * stance_force, 1.0, 5.0)
 
             self.base_env._paper_nominal_foot_pos_b = nominal_foot_pos_b.detach()
             self.base_env._paper_body_height_centers = (float(front_center), float(hind_center))
@@ -174,6 +179,12 @@ class PaperBarrierRunner:
                 "foot_radius": 0.03,
                 "settling_steps": steps,
             }
+            if original_terrain_levels is not None:
+                terrain.terrain_levels.copy_(original_terrain_levels)
+                terrain.env_origins[:] = terrain.terrain_origins[
+                    terrain.terrain_levels, terrain.terrain_types
+                ]
+                self.base_env.scene.env_origins[:] = terrain.env_origins
             self.env.reset()
             return calibration
 
@@ -220,6 +231,62 @@ class PaperBarrierRunner:
                     break
             names.append(selected_name)
         return names
+
+    def _validate_training_contract(self) -> None:
+        """Fail before learning if the R2 rough-trot task silently violates its contract."""
+        terrain = self.base_env.scene.terrain
+        levels = terrain.terrain_levels
+        if levels.numel() == 0 or torch.unique(levels).numel() < 2:
+            raise RuntimeError(
+                "PaperBarrier terrain levels are not distributed after calibration; "
+                "expected full-range rough-trot assignments."
+            )
+        if torch.any(levels < 0) or torch.any(levels >= terrain.max_terrain_level):
+            raise RuntimeError("PaperBarrier terrain levels fall outside the generated row range.")
+
+        expected_columns = {
+            "flat": 4,
+            "bumpy": 4,
+            "slope_up": 2,
+            "slope_down": 2,
+            "stairs_up": 2,
+            "stairs_down": 2,
+        }
+        actual_columns = dict(Counter(self.terrain_column_names))
+        if actual_columns != expected_columns:
+            raise RuntimeError(
+                f"PaperBarrier terrain-column contract mismatch: {actual_columns} != {expected_columns}."
+            )
+
+        asset = self.base_env.scene["robot"]
+        legs_actuator = asset.actuators.get("legs")
+        if legs_actuator is None:
+            raise RuntimeError("PaperBarrier requires the R2 'legs' actuator group.")
+        effort_limits = legs_actuator.effort_limit
+        if not torch.isfinite(effort_limits).all() or not torch.all(effort_limits > 0.0):
+            raise RuntimeError("PaperBarrier received non-positive or non-finite R2 effort limits.")
+        unique_effort_limits = torch.unique(effort_limits).sort().values
+        expected_effort_limits = torch.tensor((120.0, 320.0), device=effort_limits.device)
+        if unique_effort_limits.shape != expected_effort_limits.shape or not torch.allclose(
+            unique_effort_limits, expected_effort_limits
+        ):
+            raise RuntimeError(
+                "PaperBarrier expected R2 effort limits {120, 320} Nm, got "
+                f"{unique_effort_limits.detach().cpu().tolist()}."
+            )
+
+        contact_force_on = float(self.calibration["contact_force_on"])
+        if not 1.0 <= contact_force_on <= 5.0:
+            raise RuntimeError(f"PaperBarrier TIP contact threshold is invalid: {contact_force_on} N.")
+        clearance_lower_bound = 0.07 * float(self.calibration["length_scale"])
+        print(
+            "[PAPER_BARRIER] contract: "
+            f"terrain_level_mean={float(levels.float().mean()):.2f}, "
+            f"terrain_level_max={int(levels.max())}, columns={actual_columns}, "
+            f"effort_limits_nm={unique_effort_limits.detach().cpu().tolist()}, "
+            f"tip_contact_threshold_n={contact_force_on:.2f}, "
+            f"clearance_lower_bound_m={clearance_lower_bound:.3f}"
+        )
 
     @staticmethod
     def _accumulate_metric(sums: dict, counts: dict, name: str, value: torch.Tensor) -> None:
@@ -417,6 +484,8 @@ class PaperBarrierRunner:
             self.base_env._paper_learning_iteration = iteration
             standard_sum = 0.0
             barrier_sum = 0.0
+            training_standard_sum = 0.0
+            training_barrier_sum = 0.0
             rollout_metric_sums = {}
             rollout_metric_counts = {}
             episode_statistics = self._new_episode_statistics()
@@ -424,7 +493,7 @@ class PaperBarrierRunner:
                 for _ in range(self.num_steps_per_env):
                     transition = self.alg.act(obs, commands, targets)
                     next_obs, _, dones, infos = self.env.step(transition["actions"])
-                    standard_rewards, barrier_rewards = self._raw_reward_streams()
+                    raw_standard_rewards, raw_barrier_rewards = self._raw_reward_streams()
                     dones = dones.to(self.device)
                     dones_float = dones.float()
                     time_outs = infos.get("time_outs")
@@ -432,8 +501,12 @@ class PaperBarrierRunner:
                         time_outs = torch.zeros_like(dones_float)
                     else:
                         time_outs = time_outs.to(self.device).float()
-                    standard_rewards = standard_rewards + self.alg.gamma * transition["standard_values"] * time_outs
-                    barrier_rewards = barrier_rewards + self.alg.gamma * transition["barrier_values"] * time_outs
+                    training_standard_rewards = (
+                        raw_standard_rewards + self.alg.gamma * transition["standard_values"] * time_outs
+                    )
+                    training_barrier_rewards = (
+                        raw_barrier_rewards + self.alg.gamma * transition["barrier_values"] * time_outs
+                    )
                     self.alg.storage.add(
                         {
                             "proprio": obs,
@@ -444,21 +517,23 @@ class PaperBarrierRunner:
                             "log_probs": transition["log_probs"],
                             "action_mean": transition["action_mean"],
                             "action_std": transition["action_std"],
-                            "standard_rewards": standard_rewards,
-                            "barrier_rewards": barrier_rewards,
+                            "standard_rewards": training_standard_rewards,
+                            "barrier_rewards": training_barrier_rewards,
                             "dones": dones_float,
                             "standard_values": transition["standard_values"],
                             "barrier_values": transition["barrier_values"],
                         }
                     )
-                    standard_sum += float(standard_rewards.mean())
-                    barrier_sum += float(barrier_rewards.mean())
+                    standard_sum += float(raw_standard_rewards.mean())
+                    barrier_sum += float(raw_barrier_rewards.mean())
+                    training_standard_sum += float(training_standard_rewards.mean())
+                    training_barrier_sum += float(training_barrier_rewards.mean())
                     self._accumulate_rollout_diagnostics(rollout_metric_sums, rollout_metric_counts)
                     barrier_metrics = getattr(self.base_env, "_paper_barrier_metrics", {})
                     episode_xy_error += barrier_metrics["Tracking/lin_vel_xy_max_abs_error"].to(self.device)
                     episode_yaw_error += barrier_metrics["Tracking/yaw_rate_error"].to(self.device)
                     episode_moving_steps += barrier_metrics["Tracking/is_moving_command"].to(self.device)
-                    episode_reward += standard_rewards + barrier_rewards
+                    episode_reward += raw_standard_rewards + raw_barrier_rewards
                     episode_length += 1
                     done_ids = torch.nonzero(dones, as_tuple=False).flatten()
                     if done_ids.numel():
@@ -493,7 +568,9 @@ class PaperBarrierRunner:
             elapsed = time.time() - start
             mean_standard = standard_sum / self.num_steps_per_env
             mean_barrier = barrier_sum / self.num_steps_per_env
-            terrain_difficulty = 1.0
+            mean_training_standard = training_standard_sum / self.num_steps_per_env
+            mean_training_barrier = training_barrier_sum / self.num_steps_per_env
+            configured_max_difficulty = 1.0
             rollout_metrics = self._finalize_rollout_diagnostics(rollout_metric_sums, rollout_metric_counts)
             rollout_metrics["Terrain/actual_mean_level"] = float(terrain.terrain_levels.float().mean())
             rollout_metrics["Terrain/actual_max_level"] = float(terrain.terrain_levels.max())
@@ -504,7 +581,9 @@ class PaperBarrierRunner:
                 elapsed,
                 mean_standard,
                 mean_barrier,
-                terrain_difficulty,
+                mean_training_standard,
+                mean_training_barrier,
+                configured_max_difficulty,
                 metrics,
                 rollout_metrics,
                 episode_metrics,
@@ -524,7 +603,9 @@ class PaperBarrierRunner:
         elapsed,
         standard,
         barrier,
-        difficulty,
+        training_standard,
+        training_barrier,
+        configured_max_difficulty,
         optimization_metrics,
         rollout_metrics,
         episode_metrics,
@@ -540,9 +621,10 @@ class PaperBarrierRunner:
             f"  iteration_time_s          : {elapsed:.2f}\n"
             f"  standard_reward_per_step  : {standard:.4f}\n"
             f"  barrier_reward_per_step   : {barrier:.4f}\n"
+            f"  training_reward_per_step  : {training_standard + training_barrier:.4f}\n"
             f"  mean_episode_reward       : {mean_episode_reward:.3f}\n"
             f"  mean_episode_length       : {mean_episode_length:.1f}\n"
-            f"  terrain_difficulty        : {difficulty:.3f}\n"
+            f"  terrain_max_difficulty    : {configured_max_difficulty:.3f}\n"
             f"  estimator_loss            : {optimization_metrics['estimator_loss']:.4f}\n"
             f"  policy_loss               : {optimization_metrics['policy_loss']:.4f}"
         )
@@ -562,9 +644,13 @@ class PaperBarrierRunner:
             return
         self.writer.add_scalar("Reward/paper_standard_per_step", standard, iteration)
         self.writer.add_scalar("Reward/paper_barrier_per_step", barrier, iteration)
+        self.writer.add_scalar("TrainingReward/paper_standard_per_step", training_standard, iteration)
+        self.writer.add_scalar("TrainingReward/paper_barrier_per_step", training_barrier, iteration)
         self.writer.add_scalar("Train/mean_episode_reward", mean_episode_reward, iteration)
         self.writer.add_scalar("Train/mean_episode_length", mean_episode_length, iteration)
-        self.writer.add_scalar("Curriculum/terrain_difficulty", difficulty, iteration)
+        self.writer.add_scalar(
+            "Terrain/configured_max_difficulty", configured_max_difficulty, iteration
+        )
         self.writer.add_scalar("Performance/iteration_seconds", elapsed, iteration)
         for name, value in optimization_metrics.items():
             self.writer.add_scalar(f"Loss/{name}", value, iteration)

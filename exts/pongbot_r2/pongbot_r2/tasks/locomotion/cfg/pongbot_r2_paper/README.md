@@ -57,7 +57,9 @@ geometry와 force 측정 시점을 분리한다.
 - HOUND 기준에 대한 R2 길이 scale
 - stance force 기반 contact threshold
 
-측정 결과는 checkpoint의 `calibration` 필드에 저장되고 재개 시 복원된다. 관절 각도,
+calibration이 끝나면 시작 시 무작위 배정됐던 terrain level과 origin을 복원한다. contact label은
+가벼운 TIP 접촉을 놓치지 않도록 stance force의 3%를 사용하되 `1~5 N`으로 제한한다. 측정 결과는
+checkpoint의 `calibration` 필드에 저장되고 재개 시 복원된다. 관절 각도,
 관절 속도, action bound처럼 단위가 로봇 길이와 무관한 barrier는 scale하지 않는다.
 
 ## Rough-trot terrain
@@ -67,9 +69,13 @@ bumpy 25%, slope up/down 각 12.5%, stairs up/down 각 12.5%다. 논문이 공�
 6 cm bump, 27도 slope, 20 cm stair를 사용한다. 요청 범위 밖인 34.5 cm discrete step과
 별도 high-step/gallop task는 포함하지 않는다.
 
+terrain column은 16개이며 flat/bumpy에 각각 4개, slope/stairs의 상승·하강에 각각 2개를
+배정한다. 따라서 위 비율을 column 반올림 없이 정확히 구현한다.
+
 논문은 rough-trot policy에 대한 난도 curriculum을 명시하지 않았으므로 기존의 임의
 iteration ramp를 제거했다. 시작부터 0~100% terrain row를 400개 병렬 환경에 분산해 사용하며,
-`Curriculum/terrain_difficulty`는 고정값 1.0이다.
+`Terrain/configured_max_difficulty`는 1.0이다. runner는 학습 전에 terrain level이 둘 이상의
+row에 분산됐는지 검사하며, calibration 뒤 level 0에 고정되면 즉시 중단한다.
 
 ## 재현 가정
 
@@ -86,7 +92,12 @@ height-difference 항은 보수적으로 각각 1.0을 사용한다. 이는 논�
 논문의 raw torque 계수는 로봇 effort scale이 달라 R2에 그대로 대응하지 않는다. Standard
 torque regularization은 R2 actuator limit(HR/HP 120 Nm, knee 320 Nm)으로 torque를 나눈 뒤
 제곱합에 weight 1.0을 적용한다. 따라서 관절별 실제 사용 가능 torque 비율을 같은 기준으로
-제한한다.
+제한한다. explicit actuator의 PhysX solver limit가 아니라 `legs.effort_limit`을 사용하며,
+시작 시 실제 unique limit가 `{120, 320}`인지 검사한다.
+
+논문의 `p_des=0.15 m`와 clearance lower bound `-0.08 m`를 R2 길이로 함께 scale한다. 따라서
+R2의 calibration scale이 1.057이면 기준점은 약 15.9 cm지만 실제 constraint lower bound는
+`15.9-8.5=7.4 cm`다. 15.9 cm 전체가 강제 최소 clearance는 아니다.
 
 기존 coupled-optimizer checkpoint의 model weight는 읽을 수 있지만 optimizer state는 새 구조와
 호환되지 않는다. 이 변경의 본 학습 비교는 checkpoint 재개가 아니라 scratch run으로 수행한다.
@@ -94,7 +105,8 @@ torque regularization은 R2 actuator limit(HR/HP 120 Nm, knee 320 Nm)으로 torq
 주요 TensorBoard 항목은 `Reward/paper_standard_per_step`,
 `Reward/paper_barrier_per_step`, `Loss/*estimator_loss`,
 `Diagnostics/*violation`, `Diagnostics/illegal_contact`,
-`Curriculum/terrain_difficulty`다.
+`Terrain/actual_mean_level`이다. `Reward/*`와 `Train/mean_episode_reward`는 순수 환경 reward이며,
+timeout critic bootstrap을 포함한 PPO 입력은 `TrainingReward/*`로 별도 기록한다.
 
 ## 학습 성공 기준과 로그 해석
 
@@ -113,9 +125,10 @@ BODY/THIGH 접촉에 의한 조기 종료 없이 episode를 끝까지 완료하�
   iteration_time_s          : ...
   standard_reward_per_step  : ...
   barrier_reward_per_step   : ...
+  training_reward_per_step  : ...
   mean_episode_reward       : ...
   mean_episode_length       : ...
-  terrain_difficulty        : ...
+  terrain_max_difficulty    : ...
   estimator_loss            : ...
   policy_loss               : ...
 [PAPER_BARRIER_DIAG]

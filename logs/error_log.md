@@ -1,6 +1,17 @@
 # 오류 기록
 
 <details open>
+<summary>2026-07-13 20:41 [E009] [IsaacLab] PaperBarrier terrain level 0 고정 및 torque 정규화 무효</summary>
+
+- 증상: rough-trot scratch run의 iteration 0~255에서 `Terrain/actual_mean_level=0`이 유지됐고, applied torque RMS는 약 28~31 Nm인데 `Motion/torque_usage_rms`는 약 `3e-8`, torque penalty는 약 `1e-14`였음.
+- 원인: R2 calibration이 모든 terrain level을 0으로 옮긴 뒤 초기 level을 복원하지 않았고, explicit `DelayedPDActuator`의 실제 limit 대신 PhysX solver용 `joint_effort_limits` 약 `1e9`를 torque 정규화에 사용함. 또한 10개 terrain column으로 12.5% 비율을 정확히 표현할 수 없었음.
+- 확인: run `2026-07-13_19-09-21`의 TensorBoard scalar와 IsaacLab actuator 구현에서 explicit actuator의 실제 제한이 `asset.actuators["legs"].effort_limit`에 저장되는 것을 확인함. 수정 후 16-env/1-iteration smoke run `2026-07-13_20-44-25`에서 terrain mean/max `5.56/10`, torque usage RMS `0.184`, torque penalty `-0.469`, effort limit `120/320 Nm`가 기록되고 PPO update와 checkpoint 저장이 완료됨.
+- 해결: calibration 전 terrain level을 복원하고, R2 actuator limit 120/320 Nm를 직접 검증하며, terrain column을 16개로 변경함. raw episode reward와 timeout-bootstrap training reward를 분리하고 terrain·effort·contact 계약에 fail-fast 검사를 추가함.
+- 관련 파일: `rsl_rl/rsl_rl/runner/paper_barrier_runner.py`, `exts/pongbot_r2/pongbot_r2/tasks/locomotion/mdp/paper_barrier_terms.py`, `exts/pongbot_r2/pongbot_r2/tasks/locomotion/cfg/pongbot_r2_paper/terrains_cfg.py`
+
+</details>
+
+<details>
 <summary>2026-07-13 18:55 [E008] [테스트] PaperBarrier checkpoint 단위 테스트 실행 환경 누락</summary>
 
 - 증상: 독립 optimizer checkpoint 왕복 테스트의 첫 실행은 runner mock에 `device`가 없어 실패했고, 재실행은 base Python에 PyTorch가 없어 중단됨.
