@@ -39,11 +39,11 @@ class PFSceneCfg(InteractiveSceneCfg):
         max_init_terrain_level=0,
         collision_group=-1,
         physics_material=RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",   
+            friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
             static_friction=1.0,
             dynamic_friction=1.0,
-            restitution=0.0,  
+            restitution=1.0,
         ),
         visual_material=MdlFileCfg(
             mdl_path=f"{ISAACLAB_NUCLEUS_DIR}/Materials/TilesMarbleSpiderWhiteBrickBondHoned/"
@@ -86,33 +86,23 @@ class CommandCfg(BaseCommandsCfg):
         resampling_time_range=(5.0, 5.0),  # Fixed resampling time of 5 seconds
         debug_vis=False,  # No debug visualization needed
         ranges=mdp.UniformGaitCommandCfg.Ranges(
-            frequencies=(1.5, 1.5),  # Gait frequency range [Hz]
+            frequencies=(2.0, 2.0),  # Gait frequency range [Hz]
             offsets=(0.5, 0.5),  # Phase offset range [0-1]
             durations=(0.5, 0.5),  # Contact duration range [0-1]
-            swing_height=(0.1, 0.1) # foot swing height
+            swing_height=(0.05, 0.05) # foot swing height
         ),
     )
-    # gait_command = mdp.UniformGaitCommandCfg(
-    #     resampling_time_range=(5.0, 5.0),  # Fixed resampling time of 5 seconds
-    #     debug_vis=False,  # No debug visualization needed
-    #     ranges=mdp.UniformGaitCommandCfg.Ranges(
-    #         frequencies=(2.0, 2.0),  # Gait frequency range [Hz]
-    #         offsets=(0.5, 0.5),  # Phase offset range [0-1]
-    #         durations=(0.5, 0.5),  # Contact duration range [0-1]
-    #         swing_height=(0.1, 0.15) # foot swing height
-    #     ),
-    # )
 
     def __post_init__(self):
         self.base_velocity.asset_name = "robot"
         self.base_velocity.heading_command = True
         self.base_velocity.debug_vis = True
         self.base_velocity.heading_control_stiffness = 1.0
-        # self.base_velocity.resampling_time_range = (0.0, 5.0)
+        self.base_velocity.resampling_time_range = (0.0, 5.0)
         self.base_velocity.rel_standing_envs = 0.2
         self.base_velocity.rel_heading_envs = 0.0
         self.base_velocity.ranges = mdp.UniformVelocityCommandCfg.Ranges(
-            lin_vel_x=(-1.2, 1.2), lin_vel_y=(-1.2, 1.2), ang_vel_z=(-1.2, 1.2), heading=(-math.pi, math.pi)
+            lin_vel_x=(-1.5, 1.5), lin_vel_y=(-1.0, 1.0), ang_vel_z=(-1.0, 1.0), heading=(-math.pi, math.pi)
         )
 
 
@@ -137,8 +127,9 @@ class ObservarionsCfg:
         """Observation for policy group"""
 
         # # robot base measurements
-        # base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=GaussianNoise(mean=0.0, std=0.05),clip=(-100.0, 100.0),scale=0.25,)
-        # proj_gravity = ObsTerm(func=mdp.projected_gravity, noise=GaussianNoise(mean=0.0, std=0.025),clip=(-100.0, 100.0),scale=1.0,)
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=GaussianNoise(mean=0.0, std=0.05),clip=(-100.0, 100.0),scale=0.25,)
+        proj_gravity = ObsTerm(func=mdp.projected_gravity, noise=GaussianNoise(mean=0.0, std=0.025),clip=(-100.0, 100.0),scale=1.0,)
+
 
         # robot joint measurements
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=GaussianNoise(mean=0.0, std=0.01),clip=(-100.0, 100.0),scale=1.0,)
@@ -160,8 +151,8 @@ class ObservarionsCfg:
         """History Observation for policy group"""
 
         # # robot base measurements
-        # base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=GaussianNoise(mean=0.0, std=0.05),clip=(-100.0, 100.0),scale=0.25,)
-        # proj_gravity = ObsTerm(func=mdp.projected_gravity, noise=GaussianNoise(mean=0.0, std=0.025),clip=(-100.0, 100.0),scale=1.0,)
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=GaussianNoise(mean=0.0, std=0.05),clip=(-100.0, 100.0),scale=0.25,)
+        proj_gravity = ObsTerm(func=mdp.projected_gravity, noise=GaussianNoise(mean=0.0, std=0.025),clip=(-100.0, 100.0),scale=1.0,)
 
         # robot joint measurements
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=GaussianNoise(mean=0.0, std=0.01),clip=(-100.0, 100.0),scale=1.0,)
@@ -210,6 +201,9 @@ class ObservarionsCfg:
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*TIP"),
             },
         )
+        payload_target = ObsTerm(func=mdp.payload_mass)
+        payload_body_mass_delta = ObsTerm(func=mdp.payload_body_mass_delta)
+        payload_body_inertia_delta = ObsTerm(func=mdp.payload_body_inertia_delta)
 
         # robot_mass = ObsTerm(func=mdp.robot_mass)
         # robot_inertia = ObsTerm(func=mdp.robot_inertia)
@@ -222,27 +216,39 @@ class ObservarionsCfg:
             self.enable_corruption = False
             self.concatenate_terms = True
 
+
     @configclass
     class CommandsObsCfg(ObsGroup):
         velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
+
+    @configclass
+    class EncoderTargetObsCfg(ObsGroup):
+        """Supervision target for task-specific encoders."""
+
+        payload_mass = ObsTerm(func=mdp.payload_mass)
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = True
     
     policy: PolicyCfg = PolicyCfg()
     critic: CriticCfg = CriticCfg()
     commands: CommandsObsCfg = CommandsObsCfg()
     obsHistory: HistoryObsCfg = HistoryObsCfg()
+    encoder_target: EncoderTargetObsCfg = EncoderTargetObsCfg()
 
 
 @configclass
 class EventsCfg:
     """Configuration for events"""
 
-    # startup
+    # ========================================== startup
     add_base_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="BODY"),
-            "mass_distribution_params": (-5.0, 5.0),
+            "mass_distribution_params": (0.0, 0.0),
             "operation": "add",
         },
         is_global_time=False,
@@ -263,7 +269,7 @@ class EventsCfg:
         func=mdp.randomize_rigid_body_mass_inertia,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=[".*THIGH", ".*CALF", ".*TIP"]),
             "mass_inertia_distribution_params": (0.8, 1.2),
             "operation": "scale",
         },
@@ -271,19 +277,12 @@ class EventsCfg:
     robot_physics_material = EventTerm(
         func=mdp.randomize_rigid_body_material,
         mode="startup",
-        # params={
-        #     "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-        #     "static_friction_range": (0.4, 1.2),
-        #     "dynamic_friction_range": (0.7, 0.9),
-        #     "restitution_range": (0.0, 1.0),
-        #     "num_buckets": 48,
-        # },
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
             "static_friction_range": (0.2, 1.2),
             "dynamic_friction_range": (0.7, 0.9),
             "restitution_range": (0.0, 1.0),
-            "num_buckets": 64,
+            "num_buckets": 48,
         },
         is_global_time=False,
         min_step_count_between_reset=0,
@@ -312,13 +311,13 @@ class EventsCfg:
         },
     )
 
-    # reset
+    # ========================================== reset
     reset_robot_base = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {"x": (-0.25, 0.25), "y": (-0.25, 0.25), "yaw": (-3.14, 3.14)},
             # "pose_range": {"x": (-0.0, 0.0), "y": (-0.0, 0.0), "yaw": (-0.0, 0.0)},
+            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)},
             "velocity_range": {
                 "x": (-0.5, 0.5),
                 "y": (-0.5, 0.5),
@@ -342,8 +341,27 @@ class EventsCfg:
         is_global_time=False,
         min_step_count_between_reset=0,
     )
+    payload_reset = EventTerm(
+        func=mdp.apply_payload_to_body,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="BODY"),
+            "payload_mass_range": (0.0, 20.0),
+            "payload_pos_range": {
+                "x": (-0.12, 0.12),
+                "y": (-0.06, 0.06),
+                "z": (0.00, 0.12),
+                # "x": (-0.0, 0.0),
+                # "y": (-0.0, 0.0),
+                # "z": (-0.0, 0.0),
+            },
+            "zero_payload_prob": 0.30,
+        },
+        is_global_time=False,
+        min_step_count_between_reset=0,
+    )
 
-    # interval
+    # ========================================== interval
     push_robot = EventTerm(
         func=mdp.apply_external_force_torque_stochastic,
         mode="interval",
@@ -361,6 +379,24 @@ class EventsCfg:
         is_global_time=False,
         min_step_count_between_reset=0,
     )
+    # payload_interval = EventTerm(
+    #     func=mdp.apply_payload_to_body_stochastic,
+    #     mode="interval",
+    #     interval_range_s=(3.0, 8.0),
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("robot", body_names="BODY"),
+    #         "payload_mass_range": (0.0, 10.0),
+    #         "payload_pos_range": {
+    #             "x": (-0.12, 0.12),
+    #             "y": (-0.06, 0.06),
+    #             "z": (0.00, 0.12),
+    #         },
+    #         "zero_payload_prob": 0.35,
+    #         "probability": 0.0,
+    #     },
+    #     is_global_time=False,
+    #     min_step_count_between_reset=0,
+    # )
 
     set_command_zero = EventTerm(
         func=mdp.set_zero_command,
@@ -379,18 +415,18 @@ class RewardsCfg:
     """Reward terms for the MDP"""
 
     # termination related rewards
-    keep_balance = RewTerm(
-        func=mdp.stay_alive,
-        weight=0.0
-    )
+    # keep_balance = RewTerm(
+    #     func=mdp.stay_alive,
+    #     weight=0.0
+    # )
 
     # tracking related rewards
-    # rew_lin_vel_xy = RewTerm(
-    #     func=mdp.track_lin_vel_xy_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.1)}
-    # )
-    # rew_ang_vel_z = RewTerm(
-    #     func=mdp.track_ang_vel_z_exp, weight=0.5, params={"command_name": "base_velocity", "std": math.sqrt(0.1)}
-    # )
+    rew_lin_vel_xy = RewTerm(
+        func=mdp.track_lin_vel_xy_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.1)}
+    )
+    rew_ang_vel_z = RewTerm(
+        func=mdp.track_ang_vel_z_exp, weight=0.5, params={"command_name": "base_velocity", "std": math.sqrt(0.1)}
+    )
     rew_lin_vel_xy2 = RewTerm(
         func=mdp.track_lin_vel_xy_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
     )
@@ -403,11 +439,10 @@ class RewardsCfg:
     # Gait reward
     test_gait_reward = RewTerm(
         func=mdp.GaitReward,
-        weight=0.5,
+        weight=1.0,
         params={
             "tracking_contacts_shaped_force": -2.0,
             "tracking_contacts_shaped_vel": -2.0,
-            "tracking_contacts_stance_force": -1.0,
             "gait_force_sigma": 25.0,
             "gait_vel_sigma": 0.25,
             "kappa_gait_probs": 0.05,
@@ -421,7 +456,7 @@ class RewardsCfg:
         params={
             "target_height": 0.6 #0.55,
         },
-        weight=-0.1, 
+        weight=-0.05, 
     )
     pen_flat_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-0.1)
 
@@ -458,7 +493,7 @@ class RewardsCfg:
     # pen_joint_powers = RewTerm(func=mdp.joint_powers_l1, weight=-5.0e-5)
     pen_joint_powers_var = RewTerm(func=mdp.joint_powers_var, weight=-2.5e-6)
     pen_joint_default_pos = RewTerm(func=mdp.joint_deviation_l1, weight = -0.1)
-    pen_standing_joint_default_pos = RewTerm(func=mdp.stand_still_joint_deviation_l1, weight=-0.1)
+    pen_standing_joint_default_pos = RewTerm(func=mdp.stand_still_joint_deviation_l1, weight=-0.25)
     pen_standing_foot_contact = RewTerm(
         func=mdp.standing_foot_contact,
         weight=-0.5,
@@ -487,7 +522,7 @@ class RewardsCfg:
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*HR_JOINT")},
     )
 
-    pen_standing_vel = RewTerm(func=mdp.stand_still, weight=-0.1)
+    pen_standing_vel = RewTerm(func=mdp.stand_still, weight = -0.5)
     
     pen_feet_slide = RewTerm(
         func=mdp.feet_slide,
@@ -510,14 +545,14 @@ class RewardsCfg:
 class TerminationsCfg:
     """Termination terms for the MDP"""
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    base_contact = DoneTerm(
-        func=mdp.DelayedIllegalContact,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="BODY"), "threshold": 1.0, "delay_s": 0.5},
-    )
-    # thigh_contact = DoneTerm(
-    #     func=mdp.illegal_contact,
-    #     params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*THIGH"), "threshold": 1.0},
+    # base_contact = DoneTerm(
+    #     func=mdp.DelayedIllegalContact,
+    #     params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="BODY"), "threshold": 1.0, "delay_s": 0.5},
     # )
+    base_contact = DoneTerm(
+        func=mdp.illegal_contact,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="BODY"), "threshold": 1.0},
+    )
 
 
 @configclass
@@ -525,6 +560,26 @@ class CurriculumCfg:
     """Curriculum terms for the MDP"""
 
     terrain_levels = CurrTerm(func=mdp.terrain_levels_vel)
+    # payload_mass_ramp = CurrTerm(
+    #     func=mdp.ramp_payload_mass_range,
+    #     params={
+    #         "term_names": ("payload_reset", ),
+    #         # "term_names": ("payload_reset", "payload_interval"),
+    #         "start_mass_range": (0.0, 10.0),
+    #         "end_mass_range": (0.0, 30.0),
+    #         "start_step": 0,
+    #         "end_step": 72_000,
+    #     },
+    # )
+    # payload_interval_enable = CurrTerm(
+    #     func=mdp.modify_event_parameter,
+    #     params={
+    #         "term_name": "payload_interval",
+    #         "param_name": "probability",
+    #         "value": 0.5,
+    #         "num_steps": 30_000,
+    #     },
+    # )
     # penalty_ramp = CurrTerm(
     #     func=mdp.ramp_reward_terms_by_weight,
     #     params={
@@ -542,6 +597,7 @@ class CurriculumCfg:
     # )
 
 
+
 ########################
 # Environment definition
 ########################
@@ -553,7 +609,6 @@ class PFEnvCfg(ManagerBasedRLEnvCfg):
 
     # Scene settings
     scene: PFSceneCfg = PFSceneCfg(num_envs=4096, env_spacing=2.5)
-    # scene: PFSceneCfg = PFSceneCfg(num_envs=2048, env_spacing=2.5)
     debug_action_print: bool = False
     # Basic settings
     observations: ObservarionsCfg = ObservarionsCfg()

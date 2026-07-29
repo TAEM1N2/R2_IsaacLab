@@ -39,7 +39,6 @@ import cli_args  # isort: skip
 
 parser = argparse.ArgumentParser(description="Export an RSL-RL checkpoint to ONNX.")
 parser.add_argument("--task", type=str, required=True, help="Name of the task.")
-parser.add_argument("--checkpoint_path", type=str, required=True, help="Path to the trained checkpoint file.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to instantiate.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
 
@@ -58,7 +57,7 @@ from rsl_rl.runner import OnPolicyRunner, PaperBarrierRunner
 from isaaclab.envs import DirectMARLEnv, ManagerBasedRLEnvCfg, multi_agent_to_single_agent
 from isaaclab_tasks.utils import parse_env_cfg
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
-from pongbot_r2.utils.wrappers.rsl_rl import RslRlPpoAlgorithmMlpCfg, export_mlp_as_onnx
+from pongbot_r2.utils.wrappers.rsl_rl import RslRlPpoAlgorithmMlpCfg, export_encoder_as_onnx, export_mlp_as_onnx
 
 
 def main():
@@ -66,9 +65,15 @@ def main():
         task_name=args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs
     )
     agent_cfg: RslRlPpoAlgorithmMlpCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
+    # Export can run on CPU while a separate training process occupies the
+    # GPU.  The task device and the runner device must agree; otherwise the
+    # runner would still allocate CUDA tensors from its training config.
+    agent_cfg.device = args_cli.device
     env_cfg.seed = agent_cfg.seed
 
-    checkpoint_path = os.path.abspath(args_cli.checkpoint_path)
+    if args_cli.checkpoint is None:
+        raise ValueError("--checkpoint is required for ONNX export.")
+    checkpoint_path = os.path.abspath(args_cli.checkpoint)
     export_dir = os.path.join(os.path.dirname(checkpoint_path), "exported")
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode=None)
@@ -83,20 +88,40 @@ def main():
     runner_type = getattr(agent_cfg, "runner_type", "OnPolicyRunner")
     if runner_type not in runner_classes:
         raise ValueError(f"Unsupported runner_type={runner_type!r}; available={tuple(runner_classes)}")
-    runner = runner_classes[runner_type](env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    runner_cfg = agent_cfg.to_dict()
+    # The strict PaperBarrier training contract requires a full multi-level
+    # terrain calibration.  It is unnecessary for export and would force a
+    # large environment count, defeating CPU-only checkpoint conversion.
+    if runner_type == "PaperBarrierRunner":
+        runner_cfg["validate_training_contract"] = False
+    runner = runner_classes[runner_type](env, runner_cfg, log_dir=None, device=agent_cfg.device)
     runner.load(checkpoint_path)
 
     export_mlp_as_onnx(
         runner.alg.actor_critic.actor,
         export_dir,
-        "policy",
+        "nominal_actor",
         runner.alg.actor_critic.num_actor_obs,
     )
-    export_mlp_as_onnx(
+    if hasattr(runner.alg, "adaptive_actor_critic"):
+        export_mlp_as_onnx(
+            runner.alg.adaptive_actor_critic.actor,
+            export_dir,
+            "adaptive_actor",
+            runner.alg.adaptive_actor_critic.num_actor_obs,
+        )
+    if hasattr(runner.alg, "load_encoder"):
+        export_mlp_as_onnx(
+            runner.alg.load_encoder.net,
+            export_dir,
+            "load_encoder",
+            runner.alg.load_encoder.input_dim,
+        )
+    export_encoder_as_onnx(
         runner.alg.encoder,
         export_dir,
         "encoder",
-        runner.alg.encoder.num_input_dim,
+        runner.get_encoder_export_shape(),
     )
 
     print(f"Exported ONNX models to: {export_dir}")

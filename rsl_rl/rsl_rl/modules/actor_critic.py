@@ -51,6 +51,8 @@ class ActorCritic(nn.Module):
         activation="elu",
         orthogonal_init=False,
         init_noise_std=1.0,
+        logstd_min=-5.0,
+        logstd_max=0.0,
         **kwargs,
     ):
         if kwargs:
@@ -63,6 +65,8 @@ class ActorCritic(nn.Module):
         self.orthogonal_init = orthogonal_init
         self.num_actor_obs = num_actor_obs
         self.num_critic_obs = num_critic_obs
+        self.logstd_min = float(logstd_min)
+        self.logstd_max = float(logstd_max)
 
         activation = get_activation(activation)
 
@@ -115,7 +119,7 @@ class ActorCritic(nn.Module):
 
         # Action noise
         # self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
-        self.logstd = nn.Parameter(torch.zeros(num_actions))
+        self.logstd = nn.Parameter(torch.log(torch.ones(num_actions) * init_noise_std))
         self.distribution = None
         # disable args validation for speedup
         Normal.set_default_validate_args = False
@@ -152,9 +156,17 @@ class ActorCritic(nn.Module):
     def entropy(self):
         return self.distribution.entropy().sum(dim=-1)
 
+    @property
+    def clamped_logstd(self):
+        return torch.clamp(self.logstd, self.logstd_min, self.logstd_max)
+
+    def clamp_logstd_(self):
+        with torch.no_grad():
+            self.logstd.clamp_(self.logstd_min, self.logstd_max)
+
     def update_distribution(self, observations):
         mean = self.actor(observations)
-        self.distribution = Normal(mean, mean * 0.0 + torch.exp(self.logstd))
+        self.distribution = Normal(mean, mean * 0.0 + torch.exp(self.clamped_logstd))
 
     def act(self, observations, **kwargs):
         self.update_distribution(observations)

@@ -223,6 +223,16 @@ def _local_terrain_heights(
     radius: float = 0.05,
 ) -> torch.Tensor:
     """Return the highest finite terrain hit within a radius of each foot."""
+    # The estimator target, standard reward, and barrier reward all request
+    # this same four-foot terrain-relative quantity during one simulation
+    # tick.  RayCaster hit tensors are unchanged until the next physics step,
+    # so reuse the result within that tick instead of scanning all rays three
+    # times.  The integer common_step_counter also invalidates the cache after
+    # reset/physics advancement and avoids any tensor->CPU synchronization.
+    step = getattr(env, "common_step_counter", None)
+    cache = getattr(env, "_paper_terrain_height_cache", None)
+    if step is not None and cache is not None and cache[0] == step:
+        return cache[1]
     heights = torch.zeros_like(feet_positions_w[..., 2])
     for foot_idx, sensor_name in enumerate(FOOT_SCANNER_NAMES):
         scanner: RayCaster = env.scene.sensors[sensor_name]
@@ -238,6 +248,8 @@ def _local_terrain_heights(
         nearest_z = torch.gather(hits[..., 2], 1, nearest_idx.unsqueeze(1)).squeeze(1)
         nearest_z = torch.where(torch.isfinite(nearest_z), nearest_z, torch.zeros_like(nearest_z))
         heights[:, foot_idx] = torch.where(torch.isfinite(local_max), local_max, nearest_z)
+    if step is not None:
+        env._paper_terrain_height_cache = (step, heights)
     return heights
 
 
@@ -422,6 +434,8 @@ class PaperStandardReward(ManagerTermBase):
         foot_position_weight: float,
         height_difference_weight: float,
         torque_normalized_weight: float,
+        action_rate_weight: float = 2.5,
+        action_acceleration_weight: float = 1.2,
     ) -> torch.Tensor:
         asset: Articulation = env.scene[asset_cfg.name]
         sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
@@ -442,8 +456,8 @@ class PaperStandardReward(ManagerTermBase):
         desired = asset.data.default_joint_pos + action_scale * current_action
         previous_desired = asset.data.default_joint_pos + action_scale * self.previous_action
         previous_previous_desired = asset.data.default_joint_pos + action_scale * self.previous_previous_action
-        smooth_one = -2.5 * torch.sum(torch.square(desired - previous_desired), dim=1)
-        smooth_two = -1.2 * torch.sum(
+        smooth_one = -abs(action_rate_weight) * torch.sum(torch.square(desired - previous_desired), dim=1)
+        smooth_two = -abs(action_acceleration_weight) * torch.sum(
             torch.square(desired - 2.0 * previous_desired + previous_previous_desired), dim=1
         )
 
@@ -540,10 +554,12 @@ class PaperBarrierReward(ManagerTermBase):
         self.kn_ids = _ordered_joint_ids(asset, "KN_JOINT")
         self.phase_offsets = torch.tensor((0.0, 0.5, 0.5, 0.0), device=env.device)
         self.asset = asset
+        self.env = env
         self.episode_moving_error_sum = torch.zeros(env.num_envs, device=env.device)
         self.episode_moving_steps = torch.zeros(env.num_envs, device=env.device)
         self.episode_commanded_distance = torch.zeros(env.num_envs, device=env.device)
         self.episode_projected_progress = torch.zeros(env.num_envs, device=env.device)
+        env._paper_progress_reward = torch.zeros(env.num_envs, device=env.device)
         self.previous_root_pos_w = asset.data.root_pos_w[:, :2].clone()
         env._paper_episode_moving_error_sum = self.episode_moving_error_sum
         env._paper_episode_moving_steps = self.episode_moving_steps
@@ -557,6 +573,10 @@ class PaperBarrierReward(ManagerTermBase):
         self.episode_moving_steps[env_ids] = 0.0
         self.episode_commanded_distance[env_ids] = 0.0
         self.episode_projected_progress[env_ids] = 0.0
+        self.env._paper_progress_reward[env_ids] = 0.0
+        # A reset can change foot positions without advancing the global
+        # common-step counter; never reuse the previous episode's ray heights.
+        self.env._paper_terrain_height_cache = None
         self.previous_root_pos_w[env_ids] = self.asset.data.root_pos_w[env_ids, :2]
 
     def __call__(
@@ -566,6 +586,10 @@ class PaperBarrierReward(ManagerTermBase):
         sensor_cfg: SceneEntityCfg,
         gait_period: float,
         alpha: float,
+        progress_weight: float = 0.0,
+        underspeed_weight: float = 0.0,
+        moving_command_threshold: float = 0.20,
+        progress_clip: float = 1.50,
     ) -> torch.Tensor:
         asset: Articulation = env.scene[asset_cfg.name]
         sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
@@ -629,6 +653,14 @@ class PaperBarrierReward(ManagerTermBase):
         )
         root_displacement_w = asset.data.root_pos_w[:, :2] - self.previous_root_pos_w
         projected_progress = torch.sum(root_displacement_w * command_direction_w, dim=1)
+        command_speed = torch.linalg.norm(commands[:, :2], dim=1)
+        projected_speed = projected_progress / max(float(env.step_dt), 1.0e-6)
+        moving_for_progress = command_speed >= float(moving_command_threshold)
+        progress_reward = float(progress_weight) * torch.clamp(
+            projected_speed, min=-0.5, max=float(progress_clip)
+        ) * moving_for_progress.float()
+        underspeed_error = torch.clamp(command_speed - projected_speed, min=0.0, max=1.0)
+        underspeed_penalty = -float(underspeed_weight) * torch.square(underspeed_error) * moving_for_progress.float()
         self.episode_moving_error_sum += torch.where(
             traversal_command, max_xy_error, torch.zeros_like(max_xy_error)
         )
@@ -681,6 +713,10 @@ class PaperBarrierReward(ManagerTermBase):
             + base_reward
             + joint_velocity_reward
         )
+        # Keep the barrier stream a constraint stream; progress shaping belongs
+        # to the standard locomotion objective and is added separately below.
+        # The caller combines the two reward terms, so adding it here would
+        # incorrectly scale it by alpha.
         barrier = torch.nan_to_num(barrier, nan=-1.0e4, posinf=1.0e4, neginf=-1.0e4)
 
         env._paper_barrier_metrics = {
@@ -711,10 +747,14 @@ class PaperBarrierReward(ManagerTermBase):
             "Tracking/yaw_rate_error": torch.abs(velocity_error[:, 2]).detach(),
             "Tracking/command_xy_speed": torch.linalg.norm(commands[:, :2], dim=1).detach(),
             "Tracking/actual_xy_speed": torch.linalg.norm(asset.data.root_lin_vel_b[:, :2], dim=1).detach(),
+            "Tracking/projected_speed": projected_speed.detach(),
+            "Tracking/progress_reward": progress_reward.detach(),
+            "Tracking/underspeed_penalty": underspeed_penalty.detach(),
             "Tracking/is_moving_command": (~stand).float().detach(),
             "Tracking/is_traversal_command": traversal_command.float().detach(),
             "Foot/mean_swing_clearance": mean_swing_clearance.detach(),
         }
+        env._paper_progress_reward = progress_reward + underspeed_penalty
         return barrier
 
 

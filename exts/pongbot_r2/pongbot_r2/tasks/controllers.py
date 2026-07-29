@@ -155,6 +155,8 @@ class JoystickController(BaseController):
         self.joystick = None
         self.connected = False
         self.deadzone = 0.1
+        self._axes = []
+        self._buttons = []
         self._last_discovery_attempt = 0.0
         self._discovery_interval_s = 0.5
 
@@ -198,6 +200,8 @@ class JoystickController(BaseController):
                     continue
 
             try:
+                self._axes = [self.joystick.get_axis(i) for i in range(self.joystick.get_numaxes())]
+                self._buttons = [self.joystick.get_button(i) for i in range(self.joystick.get_numbuttons())]
                 vx_axis = -self.joystick.get_axis(1)
                 vy_axis = -self.joystick.get_axis(0)
                 vyaw_axis = -self.joystick.get_axis(3)
@@ -215,6 +219,16 @@ class JoystickController(BaseController):
             self._commands[0, 2] = vyaw * (self.cfg.command_plus_yaw_range if vyaw > 0 else -self.cfg.command_minus_yaw_range)
 
             time.sleep(0.02)
+
+    def get_axis(self, axis_index: int) -> float:
+        if axis_index < 0 or axis_index >= len(self._axes):
+            return 0.0
+        return float(self._axes[axis_index])
+
+    def get_button(self, button_index: int) -> int:
+        if button_index < 0 or button_index >= len(self._buttons):
+            return 0
+        return int(self._buttons[button_index])
 
     def stop(self):
         self._disconnect_joystick()

@@ -376,23 +376,143 @@ class EventsCfg:
         min_step_count_between_reset=0,
     )
 
+# @configclass
+# class RewardsCfg:
+#     """Reward terms for the MDP"""
+
+#     # termination related rewards
+#     keep_balance = RewTerm(
+#         func=mdp.stay_alive,
+#         weight=0.0
+#     )
+
+#     # tracking related rewards
+#     # rew_lin_vel_xy = RewTerm(
+#     #     func=mdp.track_lin_vel_xy_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.1)}
+#     # )
+#     # rew_ang_vel_z = RewTerm(
+#     #     func=mdp.track_ang_vel_z_exp, weight=0.5, params={"command_name": "base_velocity", "std": math.sqrt(0.1)}
+#     # )
+#     rew_lin_vel_xy2 = RewTerm(
+#         func=mdp.track_lin_vel_xy_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
+#     )
+#     rew_ang_vel_z2 = RewTerm(
+#         func=mdp.track_ang_vel_z_exp, weight=0.5, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
+#     )
+
+
+#     # =====
+#     # Gait reward
+#     test_gait_reward = RewTerm(
+#         func=mdp.GaitReward,
+#         weight=0.25,
+#         params={
+#             "tracking_contacts_shaped_force": -2.0,
+#             "tracking_contacts_shaped_vel": -2.0,
+#             "gait_force_sigma": 25.0,
+#             "gait_vel_sigma": 0.25,
+#             "kappa_gait_probs": 0.05,
+#             "command_name": "gait_command",
+#             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*TIP"),
+#             "asset_cfg": SceneEntityCfg("robot", body_names=".*TIP"),
+#         },
+#     )
+#     pen_standing_vel = RewTerm(
+#         func=mdp.stand_still,
+#         weight=-0.5,
+#     )
+#     pen_base_height = RewTerm(
+#         func=mdp.base_com_height,
+#         params={
+#             "target_height": 0.6 #0.55,
+#         },
+#         weight=-0.5, 
+#     )
+#     pen_flat_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-0.5)
+
+#     # ===== Fixed Auxiliary =====
+#     # ===== 
+#     pen_lin_vel_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-0.5)
+#     pen_ang_vel_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-5e-3) 
+#     pen_feet_regulation = RewTerm(
+#         func=mdp.feet_regulation,
+#         weight=-0.001,
+#         params={"asset_cfg": SceneEntityCfg("robot", body_names=[".*TIP"]),
+#                 "base_height_target": 0.6, "foot_radius": 0.03},
+#     )
+#     pen_undesired_contacts = RewTerm(
+#         func=mdp.undesired_contacts,
+#         weight= -0.5,
+#         params={
+#             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*CALF", ".*THIGH", "BODY"]),
+#             "threshold": 10.0,
+#         },
+#     )
+
+#     pen_joint_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-0.5)
+#     pen_joint_torque = RewTerm(func=mdp.joint_torques_l2, weight=-2.5e-6) 
+#     # pen_joint_vel_l2 = RewTerm(func=mdp.joint_vel_l2, weight= -5e-4)
+#     pen_joint_accel = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
+#     pen_action_rate = RewTerm(func=mdp.action_rate_l2_clamped, weight=-0.0025, params={"max_value": 400.0})
+#     pen_swing_height_error = RewTerm(
+#         func=mdp.pen_swing_height_error,
+#         weight=-1.0,
+#         params={"command_name": "gait_command", "asset_cfg": SceneEntityCfg("robot", body_names=".*TIP"), "foot_radius": 0.03},
+#     )
+#     # pen_action_smoothness = RewTerm(func=mdp.ActionSmoothnessPenalty, weight=-1.0e-3)
+#     # pen_joint_powers = RewTerm(func=mdp.joint_powers_l1, weight=-5.0e-5)
+#     # pen_joint_powers_var = RewTerm(func=mdp.joint_powers_var, weight=-2.5e-6)
+#     pen_joint_default_pos = RewTerm(func=mdp.joint_deviation_l1, weight = -0.1)
+#     pen_standing_joint_default_pos = RewTerm(func=mdp.stand_still_joint_deviation_l1, weight=-0.1)
+#     pen_hip_roll_pos = RewTerm(
+#         func=mdp.joint_deviation_l1,
+#         weight=-0.5,
+#         params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*HR_JOINT")},
+#     )
+
+#     pen_standing_vel = RewTerm(func=mdp.stand_still, weight = -1.0)
+    
+#     pen_feet_slide = RewTerm(
+#         func=mdp.feet_slide,
+#         weight=-0.5,
+#         params={
+#             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*TIP"),
+#             "asset_cfg": SceneEntityCfg("robot", body_names=".*TIP"),
+#         },
+#     )
+
+#     # else
+#     # pen_feet_distance = RewTerm(
+#     #     func=mdp.feet_distance,
+#     #     weight= 0.0, #-100,
+#     #     params={"min_feet_distance": 0.115, "feet_links_name": [".*TIP"]}
+#     # )
+
+#     foot_landing_vel = RewTerm(
+#         func=mdp.foot_landing_vel,
+#         weight=-0.5,
+#         params={"asset_cfg": SceneEntityCfg("robot", body_names=[".*TIP"]),
+#                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*TIP"]),
+#                  "foot_radius": 0.03, "about_landing_threshold": 0.08},
+#     )
+    
 @configclass
 class RewardsCfg:
     """Reward terms for the MDP"""
 
     # termination related rewards
-    keep_balance = RewTerm(
-        func=mdp.stay_alive,
-        weight=0.0
-    )
+    # keep_balance = RewTerm(
+    #     func=mdp.stay_alive,
+    #     weight=0.0
+    # )
 
     # tracking related rewards
-    # rew_lin_vel_xy = RewTerm(
-    #     func=mdp.track_lin_vel_xy_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.1)}
-    # )
-    # rew_ang_vel_z = RewTerm(
-    #     func=mdp.track_ang_vel_z_exp, weight=0.5, params={"command_name": "base_velocity", "std": math.sqrt(0.1)}
-    # )
+    rew_lin_vel_xy = RewTerm(
+        func=mdp.track_lin_vel_xy_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.1)}
+    )
+    rew_ang_vel_z = RewTerm(
+        func=mdp.track_ang_vel_z_exp, weight=0.5, params={"command_name": "base_velocity", "std": math.sqrt(0.1)}
+    )
     rew_lin_vel_xy2 = RewTerm(
         func=mdp.track_lin_vel_xy_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
     )
@@ -417,86 +537,104 @@ class RewardsCfg:
             "asset_cfg": SceneEntityCfg("robot", body_names=".*TIP"),
         },
     )
-    pen_standing_vel = RewTerm(
-        func=mdp.stand_still,
-        weight=-0.5,
-    )
+
     pen_base_height = RewTerm(
         func=mdp.base_com_height,
         params={
-            "target_height": 0.6 #0.55,
+            "target_height": 0.55,
         },
-        weight=-0.5, 
+        weight=-0.1, 
     )
-    pen_flat_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-0.5)
+    pen_flat_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-0.1)
 
     # ===== Fixed Auxiliary =====
     # ===== 
     pen_lin_vel_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-0.5)
     pen_ang_vel_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-5e-3) 
-    pen_feet_regulation = RewTerm(
-        func=mdp.feet_regulation,
-        weight=-0.001,
-        params={"asset_cfg": SceneEntityCfg("robot", body_names=[".*TIP"]),
-                "base_height_target": 0.6, "foot_radius": 0.03},
-    )
+    # pen_feet_regulation = RewTerm(
+    #     func=mdp.feet_regulation,
+    #     weight=-0.001,
+    #     params={"asset_cfg": SceneEntityCfg("robot", body_names=[".*TIP"]),
+    #             "base_height_target": 0.55, "foot_radius": 0.03},
+    # )
     pen_undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
-        weight= -0.5,
+        weight= -0.25,
         params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*CALF", ".*THIGH", "BODY"]),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*CALF", ".*THIGH"]),
             "threshold": 10.0,
         },
     )
 
-    pen_joint_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-0.5)
+    pen_joint_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-2.5)
     pen_joint_torque = RewTerm(func=mdp.joint_torques_l2, weight=-2.5e-6) 
+    pen_combined_torque = RewTerm(
+    func=mdp.combined_torque_penalty,
+    weight=-0.05,
+    params={"torque_safe_ratio": 0.7, "power": 6.0, "high_usage_weight": 0.1},
+    )
+
+
     # pen_joint_vel_l2 = RewTerm(func=mdp.joint_vel_l2, weight= -5e-4)
-    pen_joint_accel = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
+    pen_joint_accel = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
+    # pen_action_rate = RewTerm(func=mdp.action_rate_l2_clamped, weight=-0.01, params={"max_value": 400.0})
     pen_action_rate = RewTerm(func=mdp.action_rate_l2_clamped, weight=-0.0025, params={"max_value": 400.0})
     pen_swing_height_error = RewTerm(
         func=mdp.pen_swing_height_error,
-        weight=-1.0,
+        weight=-0.5,
         params={"command_name": "gait_command", "asset_cfg": SceneEntityCfg("robot", body_names=".*TIP"), "foot_radius": 0.03},
     )
-    # pen_action_smoothness = RewTerm(func=mdp.ActionSmoothnessPenalty, weight=-1.0e-3)
-    # pen_joint_powers = RewTerm(func=mdp.joint_powers_l1, weight=-5.0e-5)
-    # pen_joint_powers_var = RewTerm(func=mdp.joint_powers_var, weight=-2.5e-6)
-    pen_joint_default_pos = RewTerm(func=mdp.joint_deviation_l1, weight = -0.1)
-    pen_standing_joint_default_pos = RewTerm(func=mdp.stand_still_joint_deviation_l1, weight=-0.1)
+    pen_action_smoothness = RewTerm(func=mdp.ActionSmoothnessPenalty, weight=-0.0025)
+    pen_joint_powers = RewTerm(func=mdp.joint_powers_l1, weight=-5.0e-5)
+    pen_joint_powers_var = RewTerm(func=mdp.joint_powers_var, weight=-2.5e-6)
+    pen_joint_default_pos = RewTerm(func=mdp.joint_deviation_l1, weight = -0.05)
+    pen_standing_joint_default_pos = RewTerm(func=mdp.stand_still_joint_deviation_l1, weight=-0.25)
+    pen_standing_foot_contact = RewTerm(
+        func=mdp.standing_foot_contact,
+        weight=-0.5,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*TIP"),
+            "lin_threshold": 0.05,
+            "ang_threshold": 0.05,
+            "force_threshold": 1.0,
+        },
+    )
+    pen_standing_foot_height = RewTerm(
+        func=mdp.standing_foot_height,
+        weight=-1.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*TIP"),
+            "sensor_cfg": SceneEntityCfg("height_scanner"),
+            "foot_radius": 0.03,
+            "lin_threshold": 0.05,
+            "ang_threshold": 0.05,
+            "height_tolerance": 0.02,
+        },
+    )
     pen_hip_roll_pos = RewTerm(
         func=mdp.joint_deviation_l1,
-        weight=-0.5,
+        weight=-0.05,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*HR_JOINT")},
     )
 
-    pen_standing_vel = RewTerm(func=mdp.stand_still, weight = -1.0)
+    pen_standing_vel = RewTerm(func=mdp.stand_still, weight = -0.25)
     
     pen_feet_slide = RewTerm(
         func=mdp.feet_slide,
-        weight=-0.5,
+        weight=-0.1,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*TIP"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*TIP"),
         },
     )
 
-    # else
-    # pen_feet_distance = RewTerm(
-    #     func=mdp.feet_distance,
-    #     weight= 0.0, #-100,
-    #     params={"min_feet_distance": 0.115, "feet_links_name": [".*TIP"]}
-    # )
-
     foot_landing_vel = RewTerm(
         func=mdp.foot_landing_vel,
-        weight=-0.5,
+        weight=-0.1,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=[".*TIP"]),
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*TIP"]),
                  "foot_radius": 0.03, "about_landing_threshold": 0.08},
     )
-    
-    
 
 
 @configclass

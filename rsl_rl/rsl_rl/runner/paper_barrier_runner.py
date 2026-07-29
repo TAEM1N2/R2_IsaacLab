@@ -28,6 +28,10 @@ class PaperBarrierRunner:
         self.writer = None
         self.current_learning_iteration = 0
         self.num_steps_per_env = train_cfg["num_steps_per_env"]
+        # Diagnostics are for observability, not the PPO objective.  Sampling
+        # them every few control steps avoids repeatedly traversing dozens of
+        # detached metric tensors in the Python rollout loop.
+        self.diagnostics_interval = max(int(train_cfg.get("diagnostics_interval", 1)), 1)
         self.save_interval = train_cfg["save_interval"]
         self.obs_history_len = 1
         self.obs_history_offsets = ()
@@ -35,7 +39,11 @@ class PaperBarrierRunner:
         self.base_env = self._find_base_env(env)
         self.calibration = self._calibrate_robot(train_cfg.get("calibration_steps", 100))
         self.terrain_column_names = self._terrain_column_names()
-        self._validate_training_contract()
+        # Play can intentionally use a single visual environment, where the
+        # training-only full-range terrain/role distribution contract cannot
+        # hold. Training keeps strict validation by default.
+        if train_cfg.get("validate_training_contract", True):
+            self._validate_training_contract()
 
         obs, extras = env.get_observations()
         observations = extras["observations"]
@@ -213,10 +221,14 @@ class PaperBarrierRunner:
         except ValueError as exc:
             raise RuntimeError(f"Expected paper reward terms, got {names}") from exc
         # RewardManager._step_reward stores raw weighted terms (before the environment dt sum).
-        return (
-            manager._step_reward[:, standard_idx].to(self.device),
-            manager._step_reward[:, barrier_idx].to(self.device),
-        )
+        standard = manager._step_reward[:, standard_idx].to(self.device)
+        # PaperBarrierReward computes the command-direction progress after the
+        # physics step.  Add the bounded moving-only shaping to the standard
+        # locomotion stream (never to the constraint/barrier stream).
+        progress = getattr(self.base_env, "_paper_progress_reward", None)
+        if progress is not None:
+            standard = standard + progress.to(self.device)
+        return standard, manager._step_reward[:, barrier_idx].to(self.device)
 
     def _terrain_column_names(self) -> list[str]:
         """Map curriculum terrain column indices to their configured terrain names."""
@@ -560,15 +572,20 @@ class PaperBarrierRunner:
         for iteration in range(self.current_learning_iteration, num_learning_iterations):
             start = time.time()
             self.base_env._paper_learning_iteration = iteration
-            standard_sum = 0.0
-            barrier_sum = 0.0
-            training_standard_sum = 0.0
-            training_barrier_sum = 0.0
+            # Keep rollout aggregates on-device.  Calling ``float(tensor)`` in
+            # the inner loop forces a CUDA synchronisation four times per
+            # environment step, which is especially expensive for the long
+            # PaperBarrier horizon.  Convert to Python scalars only once after
+            # the rollout has completed.
+            standard_sum = torch.zeros((), device=self.device)
+            barrier_sum = torch.zeros((), device=self.device)
+            training_standard_sum = torch.zeros((), device=self.device)
+            training_barrier_sum = torch.zeros((), device=self.device)
             rollout_metric_sums = {}
             rollout_metric_counts = {}
             episode_statistics = self._new_episode_statistics()
             with torch.inference_mode():
-                for _ in range(self.num_steps_per_env):
+                for step_idx in range(self.num_steps_per_env):
                     transition = self.alg.act(obs, commands, targets)
                     next_obs, _, dones, infos = self.env.step(transition["actions"])
                     raw_standard_rewards, raw_barrier_rewards = self._raw_reward_streams()
@@ -602,11 +619,12 @@ class PaperBarrierRunner:
                             "barrier_values": transition["barrier_values"],
                         }
                     )
-                    standard_sum += float(raw_standard_rewards.mean())
-                    barrier_sum += float(raw_barrier_rewards.mean())
-                    training_standard_sum += float(training_standard_rewards.mean())
-                    training_barrier_sum += float(training_barrier_rewards.mean())
-                    self._accumulate_rollout_diagnostics(rollout_metric_sums, rollout_metric_counts)
+                    standard_sum += raw_standard_rewards.mean()
+                    barrier_sum += raw_barrier_rewards.mean()
+                    training_standard_sum += training_standard_rewards.mean()
+                    training_barrier_sum += training_barrier_rewards.mean()
+                    if step_idx % self.diagnostics_interval == 0:
+                        self._accumulate_rollout_diagnostics(rollout_metric_sums, rollout_metric_counts)
                     barrier_metrics = getattr(self.base_env, "_paper_barrier_metrics", {})
                     episode_xy_error += barrier_metrics["Tracking/lin_vel_xy_max_abs_error"].to(self.device)
                     episode_yaw_error += barrier_metrics["Tracking/yaw_rate_error"].to(self.device)
@@ -653,10 +671,10 @@ class PaperBarrierRunner:
             metrics = self.alg.update()
             total_steps += self.env.num_envs * self.num_steps_per_env
             elapsed = time.time() - start
-            mean_standard = standard_sum / self.num_steps_per_env
-            mean_barrier = barrier_sum / self.num_steps_per_env
-            mean_training_standard = training_standard_sum / self.num_steps_per_env
-            mean_training_barrier = training_barrier_sum / self.num_steps_per_env
+            mean_standard = float((standard_sum / self.num_steps_per_env).detach())
+            mean_barrier = float((barrier_sum / self.num_steps_per_env).detach())
+            mean_training_standard = float((training_standard_sum / self.num_steps_per_env).detach())
+            mean_training_barrier = float((training_barrier_sum / self.num_steps_per_env).detach())
             configured_max_difficulty = 1.0
             rollout_metrics = self._finalize_rollout_diagnostics(rollout_metric_sums, rollout_metric_counts)
             rollout_metrics["Terrain/actual_mean_level"] = float(terrain.terrain_levels.float().mean())
@@ -737,6 +755,9 @@ class PaperBarrierRunner:
             f"  traversal_success         : {episode_metrics['Episode/traversal_tracking_success_rate']:.3f}\n"
             f"  lin_vel_xy_error          : {rollout_metrics.get('Tracking/lin_vel_xy_error', 0.0):.3f}\n"
             f"  actual_xy_speed           : {rollout_metrics.get('Tracking/actual_xy_speed', 0.0):.3f}\n"
+            f"  projected_speed           : {rollout_metrics.get('Tracking/projected_speed', 0.0):.3f}\n"
+            f"  progress_reward           : {rollout_metrics.get('Tracking/progress_reward', 0.0):.3f}\n"
+            f"  underspeed_penalty        : {rollout_metrics.get('Tracking/underspeed_penalty', 0.0):.3f}\n"
             f"  swing_clearance_m         : {rollout_metrics.get('Foot/mean_swing_clearance', 0.0):.3f}\n"
             f"  body_contact_rate         : {rollout_metrics.get('Contact/body_rate', 0.0):.4f}\n"
             f"  persistent_calf_rate      : {rollout_metrics.get('Contact/calf_persistent_rate', 0.0):.3f}\n"

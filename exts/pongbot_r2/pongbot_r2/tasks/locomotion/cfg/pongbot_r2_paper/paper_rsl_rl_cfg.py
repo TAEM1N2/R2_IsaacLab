@@ -53,12 +53,16 @@ class PaperBarrierAlgorithmCfg:
 @configclass
 class PongBotR2PaperBarrierRunnerCfg(RslRlOnPolicyRunnerCfg):
     runner_type: str = "PaperBarrierRunner"
-    num_steps_per_env: int = 400
+    # 1024 envs x 96 steps = 98,304 transitions per PPO iteration.
+    num_steps_per_env: int = 96
     max_iterations: int = 10_000
     save_interval: int = 100
     experiment_name: str = "pongbot_r2_paper_barrier_rough"
     empirical_normalization: bool = False
     calibration_steps: int = 100
+    # Logging-only sampling interval; PPO rollout and episode success metrics
+    # remain every control step. Set to 1 to reproduce the old diagnostics.
+    diagnostics_interval: int = 4
     policy: PaperBarrierPolicyCfg = PaperBarrierPolicyCfg()
     algorithm: PaperBarrierAlgorithmCfg = PaperBarrierAlgorithmCfg()
 

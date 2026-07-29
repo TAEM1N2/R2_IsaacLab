@@ -10,6 +10,7 @@ from .commands import *
 from .curriculums import *
 from .events import *
 from .observations import *
+from .one_way_stairs import *
 from .paper_barrier_terms import *
 from .rewards import *
 from .terminations import *

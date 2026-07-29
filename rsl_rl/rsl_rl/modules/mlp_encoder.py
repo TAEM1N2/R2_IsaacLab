@@ -54,6 +54,7 @@ class MLP_Encoder(nn.Module):
         activation="elu",
         orthogonal_init=False,
         output_detach=False,
+        policy_output_scales=None,
         **kwargs,
     ):
         if kwargs:
@@ -67,6 +68,18 @@ class MLP_Encoder(nn.Module):
         self.output_detach = output_detach
         self.num_input_dim = num_input_dim
         self.num_output_dim = num_output_dim
+        if policy_output_scales is None:
+            self.policy_output_scales = None
+        else:
+            if len(policy_output_scales) != num_output_dim:
+                raise ValueError(
+                    f"policy_output_scales length mismatch: expected {num_output_dim}, got {len(policy_output_scales)}"
+                )
+            self.register_buffer(
+                "policy_output_scales",
+                torch.tensor(policy_output_scales, dtype=torch.float32),
+                persistent=False,
+            )
 
         activation = get_activation(activation)
 
@@ -96,21 +109,33 @@ class MLP_Encoder(nn.Module):
         Normal.set_default_validate_args = False
 
     def forward(self, input):
-        return _sanitize_encoder_output(self.encoder(input))
+        raw_out = _sanitize_encoder_output(self.encoder(input))
+        return self._scale_for_policy(raw_out)
 
     def encode(self, input):
         self.encoder_out = _sanitize_encoder_output(self.encoder(input))
+        self.encoder_out_policy = self._scale_for_policy(self.encoder_out)
         if self.output_detach:
-            return self.encoder_out.detach()
+            return self.encoder_out_policy.detach()
         else:
-            return self.encoder_out
+            return self.encoder_out_policy
 
     def get_encoder_out(self):
         return self.encoder_out
 
+    def get_policy_encoder_out(self):
+        return self.encoder_out_policy
+
     def inference(self, input):
         with torch.no_grad():
-            return _sanitize_encoder_output(self.encoder(input))
+            raw_out = _sanitize_encoder_output(self.encoder(input))
+            return self._scale_for_policy(raw_out)
+
+    def _scale_for_policy(self, tensor: torch.Tensor) -> torch.Tensor:
+        if self.policy_output_scales is None:
+            return tensor
+        scaled = tensor * self.policy_output_scales
+        return _sanitize_encoder_output(scaled)
 
 
 def get_activation(act_name):

@@ -29,5 +29,14 @@ class UniformGaitCommandCfg(CommandTermCfg):
     ranges: Ranges = MISSING
     """Distribution ranges for the gait parameters."""
 
+    profiles: tuple[tuple[float, float, float, float], ...] | None = None
+    """Optional gait command anchors as ``(frequency, offset, duration, swing_height)``."""
+
+    profile_probabilities: tuple[float, ...] | None = None
+    """Sampling probability for each profile. Uniform sampling is used when unset."""
+
+    jitter: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    """Uniform jitter half-width around each sampled profile."""
+
     resampling_time_range: tuple[float, float] = MISSING
     """Time interval for resampling the gait (in seconds)."""

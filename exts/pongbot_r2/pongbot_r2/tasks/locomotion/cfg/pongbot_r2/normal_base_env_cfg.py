@@ -36,7 +36,7 @@ class PFSceneCfg(InteractiveSceneCfg):
         prim_path="/World/ground",
         terrain_type="plane",
         terrain_generator=None,
-        max_init_terrain_level=0,
+        max_init_terrain_level=10,
         collision_group=-1,
         physics_material=RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -126,6 +126,10 @@ class ObservarionsCfg:
     class PolicyCfg(ObsGroup):
         """Observation for policy group"""
 
+        # # robot base measurements
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=GaussianNoise(mean=0.0, std=0.05),clip=(-100.0, 100.0),scale=0.25,)
+        proj_gravity = ObsTerm(func=mdp.projected_gravity, noise=GaussianNoise(mean=0.0, std=0.025),clip=(-100.0, 100.0),scale=1.0,)
+
         # robot joint measurements
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=GaussianNoise(mean=0.0, std=0.01),clip=(-100.0, 100.0),scale=1.0,)
         joint_vel = ObsTerm(func=mdp.joint_vel, noise=GaussianNoise(mean=0.0, std=0.01),clip=(-100.0, 100.0),scale=0.05,)
@@ -145,12 +149,18 @@ class ObservarionsCfg:
     class HistoryObsCfg(ObsGroup):
         """History Observation for policy group"""
 
+        # # robot base measurements
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=GaussianNoise(mean=0.0, std=0.05),clip=(-100.0, 100.0),scale=0.25,)
+        proj_gravity = ObsTerm(func=mdp.projected_gravity, noise=GaussianNoise(mean=0.0, std=0.025),clip=(-100.0, 100.0),scale=1.0,)
+
         # robot joint measurements
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=GaussianNoise(mean=0.0, std=0.01),clip=(-100.0, 100.0),scale=1.0,)
         joint_vel = ObsTerm(func=mdp.joint_vel, noise=GaussianNoise(mean=0.0, std=0.01),clip=(-100.0, 100.0),scale=0.05,)
-
         # last action
         last_action = ObsTerm(func=mdp.last_action)
+        # gaits
+        gait_phase = ObsTerm(func=mdp.get_gait_phase)
+        gait_command = ObsTerm(func=mdp.get_gait_command, params={"command_name": "gait_command"})
         
         def __post_init__(self):
             self.enable_corruption = True
@@ -166,41 +176,42 @@ class ObservarionsCfg:
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel)
         proj_gravity = ObsTerm(func=mdp.projected_gravity)
-
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel)
-
         last_action = ObsTerm(func=mdp.last_action)
-
-        # vel_command = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
-
+        vel_command = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
         gait_phase = ObsTerm(func=mdp.get_gait_phase)
         gait_command = ObsTerm(func=mdp.get_gait_command, params={"command_name": "gait_command"})
 
-        heights = ObsTerm(func=mdp.height_scan,params={"sensor_cfg": SceneEntityCfg("height_scanner")})
+
+        # heights = ObsTerm(func=mdp.height_scan,params={"sensor_cfg": SceneEntityCfg("height_scanner")})
+        heights = ObsTerm(
+           func=mdp.safe_height_scan,
+           params={"sensor_cfg": SceneEntityCfg("height_scanner")},
+        )
+        robot_pos = ObsTerm(func=mdp.robot_pos)
         
         # Privileged observation
-        robot_joint_torque = ObsTerm(func=mdp.robot_joint_torque)
+        # robot_joint_torque = ObsTerm(func=mdp.robot_joint_torque)
         # robot_joint_acc = ObsTerm(func=mdp.robot_joint_acc)
-        # robot_feet_contact_force = ObsTerm(
-        #     func=mdp.robot_feet_contact_force,
-        #     params={
-        #         "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*TIP"),
-        #     },
-        # )
+        robot_feet_contact_force = ObsTerm(
+            func=mdp.robot_feet_contact_force,
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*TIP"),
+            },
+        )
 
-        robot_mass = ObsTerm(func=mdp.robot_mass)
+        # robot_mass = ObsTerm(func=mdp.robot_mass)
         # robot_inertia = ObsTerm(func=mdp.robot_inertia)
         # robot_joint_stiffness = ObsTerm(func=mdp.robot_joint_stiffness)
         # robot_joint_damping = ObsTerm(func=mdp.robot_joint_damping)
-        robot_pos = ObsTerm(func=mdp.robot_pos)
         # robot_vel = ObsTerm(func=mdp.robot_vel)
         # robot_material_propertirs = ObsTerm(func=mdp.robot_material_properties)
-        # robot_base_pose = ObsTerm(func=mdp.robot_base_pose)
 
         def __post_init__(self):
             self.enable_corruption = False
             self.concatenate_terms = True
+
 
     @configclass
     class CommandsObsCfg(ObsGroup):
@@ -253,7 +264,7 @@ class EventsCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.4, 1.2),
+            "static_friction_range": (0.2, 1.2),
             "dynamic_friction_range": (0.7, 0.9),
             "restitution_range": (0.0, 1.0),
             "num_buckets": 48,
@@ -279,7 +290,7 @@ class EventsCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "com_distribution_params": ((-0.075, 0.075), (-0.05, 0.06), (-0.05, 0.05)),
+            "com_distribution_params": ((-0.1, 0.1), (-0.05, 0.06), (-0.05, 0.05)),
             "operation": "add",
             "distribution": "uniform",
         },
@@ -338,10 +349,10 @@ class EventsCfg:
     set_command_zero = EventTerm(
         func=mdp.set_zero_command,
         mode="interval",
-        interval_range_s=(5.0, 10.0),
+        interval_range_s=(8.0, 15.0),
         params={
             "command_name": "base_velocity",
-            "duration_s": 2.0,
+            "duration_s": 1.0,
         },
         is_global_time=False,
         min_step_count_between_reset=0,
@@ -435,6 +446,28 @@ class RewardsCfg:
     pen_joint_powers_var = RewTerm(func=mdp.joint_powers_var, weight=-2.5e-6)
     pen_joint_default_pos = RewTerm(func=mdp.joint_deviation_l1, weight = -0.1)
     pen_standing_joint_default_pos = RewTerm(func=mdp.stand_still_joint_deviation_l1, weight=-0.1)
+    pen_standing_foot_contact = RewTerm(
+        func=mdp.standing_foot_contact,
+        weight=-0.5,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*TIP"),
+            "lin_threshold": 0.05,
+            "ang_threshold": 0.05,
+            "force_threshold": 1.0,
+        },
+    )
+    pen_standing_foot_height = RewTerm(
+        func=mdp.standing_foot_height,
+        weight=-1.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*TIP"),
+            "sensor_cfg": SceneEntityCfg("height_scanner"),
+            "foot_radius": 0.03,
+            "lin_threshold": 0.05,
+            "ang_threshold": 0.05,
+            "height_tolerance": 0.02,
+        },
+    )
     pen_hip_roll_pos = RewTerm(
         func=mdp.joint_deviation_l1,
         weight=-0.1,

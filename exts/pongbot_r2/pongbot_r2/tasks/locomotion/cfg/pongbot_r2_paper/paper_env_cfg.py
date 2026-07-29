@@ -41,6 +41,10 @@ def _foot_scanner(foot_name: str) -> RayCasterCfg:
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.5)),
         pattern_cfg=patterns.GridPatternCfg(resolution=0.025, size=(0.10, 0.10)),
         mesh_prim_paths=["/World/ground"],
+        # The policy/reward step is 10 ms (dt=.002, decimation=5). Updating
+        # once per control step avoids five identical raycasts per action while
+        # preserving the terrain sample used by the reward.
+        update_period=0.01,
         debug_vis=False,
     )
 
@@ -224,7 +228,12 @@ class PaperRewardsCfg:
             "action_scale": 0.25,
             "foot_position_weight": 1.0,
             "height_difference_weight": 1.0,
-            "torque_normalized_weight": 1.0,
+            # Reversible speed-tradeoff experiment: preserve standing
+            # stability while reducing the multiplicative attenuation of
+            # velocity reward during rough-terrain leg excursions.
+            "torque_normalized_weight": 0.70,
+            "action_rate_weight": 2.0,
+            "action_acceleration_weight": 0.80,
         },
     )
     paper_barrier = RewTerm(
@@ -235,6 +244,13 @@ class PaperRewardsCfg:
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "gait_period": 0.72,
             "alpha": 0.10,
+            # Moving-only forward-progress shaping.  The original paper
+            # progress criterion is episode-level; these bounded terms make
+            # insufficient speed visible every control step.
+            "progress_weight": 0.20,
+            "underspeed_weight": 0.12,
+            "moving_command_threshold": 0.20,
+            "progress_clip": 1.50,
         },
     )
 
@@ -268,7 +284,9 @@ class PaperCurriculumCfg:
 
 @configclass
 class PaperBarrierRoughEnvCfg(ManagerBasedRLEnvCfg):
-    scene: PaperBarrierSceneCfg = PaperBarrierSceneCfg(num_envs=400, env_spacing=2.5)
+    # Keep the same rollout sample budget as the implicit baseline while
+    # retaining a longer contiguous trajectory for terrain recovery.
+    scene: PaperBarrierSceneCfg = PaperBarrierSceneCfg(num_envs=1024, env_spacing=2.5)
     observations: PaperObservationsCfg = PaperObservationsCfg()
     actions: PaperActionsCfg = PaperActionsCfg()
     commands: PaperCommandsCfg = PaperCommandsCfg()

@@ -15,6 +15,7 @@ import sys
 
 
 import argparse
+import math
 
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -86,7 +87,12 @@ parser.add_argument("--max_iterations", type=int, default=None, help="Maximum nu
 parser.add_argument("--save_interval", type=int, default=None, help="The number of iterations between saves")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
-parser.add_argument("--checkpoint_path", type=str, default=None, help="Relative path to checkpoint file.")
+parser.add_argument(
+    "--sigma",
+    type=float,
+    default=None,
+    help="Override the policy action noise standard deviation after loading a checkpoint.",
+)
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -132,7 +138,7 @@ from isaaclab.envs import (
 )
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.io import dump_pickle, dump_yaml
-from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
+from isaaclab_tasks.utils import parse_env_cfg
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 
 from pongbot_r2.utils.wrappers.rsl_rl import RslRlPpoAlgorithmMlpCfg
@@ -372,7 +378,11 @@ def main():
         env = multi_agent_to_single_agent(env)
 
     # wrap around environment for rsl-rl
-    env = RslRlVecEnvWrapper(env, clip_actions=10.0)
+    # The legacy implicit ablation uses the explicit [-10, 10] environment
+    # clamp.  Keep the existing wrapper limit for all other tasks unchanged.
+    wrapper_action_clip = 10.0
+    print(f"[INFO] Environment action clip: [-{wrapper_action_clip}, {wrapper_action_clip}]")
+    env = RslRlVecEnvWrapper(env, clip_actions=wrapper_action_clip)
     # env = RslRlVecEnvWrapper(env)
 
     # create runner from rsl-rl
@@ -391,16 +401,17 @@ def main():
 
     # write git state to logs
     # runner.add_git_repo_to_log(__file__)
-    # save resume path before creating a new log_dir
-    if agent_cfg.resume:
-        # get path to previous checkpoint
-        if args_cli.checkpoint_path is not None:
-            resume_path = args_cli.checkpoint_path
-        else:
-            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
-        print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-        # load previously trained model
-        runner.load(resume_path)
+    if args_cli.checkpoint is not None:
+        checkpoint_path = args_cli.checkpoint
+        print(f"[INFO]: Loading model checkpoint from: {checkpoint_path}")
+        runner.load(checkpoint_path)
+
+    if args_cli.sigma is not None:
+        if args_cli.sigma <= 0.0:
+            raise ValueError(f"--sigma must be positive, got {args_cli.sigma}")
+        with torch.no_grad():
+            runner.alg.actor_critic.logstd.fill_(math.log(args_cli.sigma))
+        print(f"[INFO]: Set policy action sigma to {args_cli.sigma:.6f}")
 
     # set seed of the environment
     env.seed(agent_cfg.seed)
