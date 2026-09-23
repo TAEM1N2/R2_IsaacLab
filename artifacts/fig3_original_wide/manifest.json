@@ -1,0 +1,131 @@
+{
+  "source_pdf": "/home/rclab/Downloads/fig3_combined (2).pdf",
+  "size_inches": [
+    15.072222222222223,
+    6.125277777777778
+  ],
+  "snapshot_times_s": [
+    0.5,
+    2.5,
+    6.5
+  ],
+  "snapshot_crop_xyxy": [
+    360,
+    320,
+    920,
+    700
+  ],
+  "snapshot_stages": [
+    "Initial",
+    "IMU fault",
+    "Post-fault"
+  ],
+  "line_width_pt": 2.6,
+  "font_size_pt": 19,
+  "datasets": {
+    "hybrid": {
+      "path": "/home/rclab/minipb_project/results/fig3_representative_seed42_20260824/hybrid/timeseries.npz",
+      "sha256": "00cd4ed961783f1852642abf7894bddaf348882f10eb288817966d8b5d1c0ce4",
+      "samples": 700
+    },
+    "mlp_only": {
+      "path": "/home/rclab/minipb_project/results/fig3_representative_seed42_20260824/mlp_only/timeseries.npz",
+      "sha256": "4f6a902306906ca49252efb7a988041dab63f1becccc2df77758e46d3b129dc5",
+      "samples": 700
+    }
+  },
+  "fault_schedule": [
+    {
+      "start_step": 200,
+      "end_step": 209,
+      "start_s": 2.0,
+      "end_s": 2.09,
+      "subtype": "zero_imu"
+    },
+    {
+      "start_step": 209,
+      "end_step": 230,
+      "start_s": 2.09,
+      "end_s": 2.3000000000000003,
+      "subtype": "no_update"
+    },
+    {
+      "start_step": 230,
+      "end_step": 256,
+      "start_s": 2.3000000000000003,
+      "end_s": 2.56,
+      "subtype": "zero_imu"
+    },
+    {
+      "start_step": 256,
+      "end_step": 269,
+      "start_s": 2.56,
+      "end_s": 2.69,
+      "subtype": "no_update"
+    },
+    {
+      "start_step": 269,
+      "end_step": 279,
+      "start_s": 2.69,
+      "end_s": 2.79,
+      "subtype": "zero_imu"
+    },
+    {
+      "start_step": 279,
+      "end_step": 306,
+      "start_s": 2.79,
+      "end_s": 3.06,
+      "subtype": "no_update"
+    },
+    {
+      "start_step": 306,
+      "end_step": 332,
+      "start_s": 3.06,
+      "end_s": 3.3200000000000003,
+      "subtype": "zero_imu"
+    },
+    {
+      "start_step": 332,
+      "end_step": 341,
+      "start_s": 3.3200000000000003,
+      "end_s": 3.41,
+      "subtype": "no_update"
+    },
+    {
+      "start_step": 341,
+      "end_step": 352,
+      "start_s": 3.41,
+      "end_s": 3.52,
+      "subtype": "zero_imu"
+    },
+    {
+      "start_step": 352,
+      "end_step": 374,
+      "start_s": 3.52,
+      "end_s": 3.74,
+      "subtype": "no_update"
+    },
+    {
+      "start_step": 374,
+      "end_step": 396,
+      "start_s": 3.74,
+      "end_s": 3.96,
+      "subtype": "zero_imu"
+    },
+    {
+      "start_step": 396,
+      "end_step": 400,
+      "start_s": 3.96,
+      "end_s": 4.0,
+      "subtype": "no_update"
+    }
+  ],
+  "fault_channels": [
+    "base_angular_velocity_x",
+    "base_angular_velocity_y",
+    "base_angular_velocity_z",
+    "projected_gravity_x",
+    "projected_gravity_y",
+    "projected_gravity_z"
+  ]
+}

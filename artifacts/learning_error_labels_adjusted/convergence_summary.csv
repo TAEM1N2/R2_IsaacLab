@@ -1,0 +1,10 @@
+run,metric,common_iteration_start,common_iteration_end,run_iteration_start,run_iteration_end,ema_span,initial_window,final_window,persistence_hold,initial_mean,final_mean,absolute_improvement,relative_improvement_fraction,threshold_50pct,iteration_50pct,threshold_90pct,iteration_90pct,absolute_target,iteration_absolute_target,absolute_target_retained_at_end
+Hybrid,vel_tracking_error_mps,1,1500,1,1500,50,100,100,50,0.330060143,0.164846808,0.165213335,0.500555241,0.247453476,183,0.181368142,445,0.18,598,True
+MLP-only (simple reward),vel_tracking_error_mps,1,1500,1,1500,50,100,100,50,0.347022236,0.168061941,0.178960296,0.515702675,0.257542089,231,0.18595797,434,0.18,564,True
+MLP-only (auxiliary reward),vel_tracking_error_mps,1,1500,1,1500,50,100,100,50,0.325247462,0.193067684,0.132179778,0.406397568,0.259157573,122,0.206285662,211,0.18,307,False
+Hybrid,base_orientation_error_deg,1,1500,1,1500,50,100,100,50,16.4233645,6.94012977,9.48323473,0.577423385,11.6817471,140,7.88845324,505,9,332,True
+MLP-only (simple reward),base_orientation_error_deg,1,1500,1,1500,50,100,100,50,15.9233911,7.11718558,8.80620553,0.553035812,11.5202883,154,7.99780614,673,9,451,True
+MLP-only (auxiliary reward),base_orientation_error_deg,1,1500,1,1500,50,100,100,50,12.8582378,9.16735464,3.69088312,0.287044242,11.0127962,90,9.53644296,238,9,299,False
+Hybrid,foot_contact_error_n,1,1500,1,1500,50,100,100,50,16.7917746,7.27910739,9.51266717,0.566507556,12.035441,213,8.23037411,518,10,255,True
+MLP-only (simple reward),foot_contact_error_n,1,1500,1,1500,50,100,100,50,31.1128088,9.458047,21.6547618,0.696007935,20.2854279,379,11.6235232,1369,10,1381,False
+MLP-only (auxiliary reward),foot_contact_error_n,1,1500,1,1500,50,100,100,50,22.3656675,5.8043015,16.561366,0.740481633,14.0849845,80,7.46043809,197,10,183,True

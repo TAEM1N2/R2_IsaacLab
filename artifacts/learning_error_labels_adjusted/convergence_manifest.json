@@ -1,0 +1,64 @@
+{
+  "source_data": "../../../minipb_project/results/fig_training_error_comparison/hybrid_vs_mlp_only_simple_vs_aux_trial19_ep1500_continuous_20260828/comparison_training_errors.csv",
+  "runs": [
+    "Hybrid",
+    "MLP-only (simple reward)",
+    "MLP-only (auxiliary reward)"
+  ],
+  "display_names": {
+    "Hybrid": "LocoDyad",
+    "MLP-only (simple reward)": "MLP-E2E",
+    "MLP-only (auxiliary reward)": "MLP-E2E (Aux)"
+  },
+  "range_mode": "common",
+  "full_range_endpoint_markers": false,
+  "common_iteration_range": [
+    1,
+    1500
+  ],
+  "plot_iteration_range": [
+    1,
+    1500
+  ],
+  "plotted_iteration_ranges": {
+    "Hybrid": [
+      1,
+      1500
+    ],
+    "MLP-only (simple reward)": [
+      1,
+      1500
+    ],
+    "MLP-only (auxiliary reward)": [
+      1,
+      1500
+    ]
+  },
+  "requested_max_iteration": 1500,
+  "selected_checkpoint_iteration": null,
+  "selected_checkpoint_label": null,
+  "ema_span": 50,
+  "raw_trace_alpha": 0.08,
+  "initial_and_final_window": 100,
+  "persistence_hold": 50,
+  "convergence_marker_mode": {
+    "vel_tracking_error_mps": "absolute_target",
+    "base_orientation_error_deg": "absolute_target",
+    "foot_contact_error_n": "absolute_target"
+  },
+  "absolute_targets": {
+    "vel_tracking_error_mps": 0.18,
+    "base_orientation_error_deg": 9.0,
+    "foot_contact_error_n": 10.0
+  },
+  "paper_four_panel": false,
+  "font_scale": 1.65,
+  "t50_definition": "First EMA iteration at or below 50% of observed initial-to-final improvement for the full persistence hold.",
+  "t90_definition": "First EMA iteration at or below 90% of observed initial-to-final improvement for the full persistence hold.",
+  "absolute_target_definition": "First EMA iteration at or below the shared absolute target for the full persistence hold.",
+  "outputs": [
+    "learning_error_convergence_comparison_600dpi.png",
+    "learning_error_convergence_comparison.pdf",
+    "convergence_summary.csv"
+  ]
+}

@@ -1,0 +1,6 @@
+[INFO] [1784788220.371160247] [baseline_trained_gait_snapshot_controller]: Snapshots scheduled at gait t=0.5/1.5/2.5 s.
+[INFO] [1784788226.321034553] [baseline_trained_gait_snapshot_controller]: Snapshot ok: gait_t=0.5 s, observation=50.
+[INFO] [1784788227.321472951] [baseline_trained_gait_snapshot_controller]: Snapshot ok: gait_t=1.5 s, observation=150.
+[INFO] [1784788228.320692110] [baseline_trained_gait_snapshot_controller]: Snapshot ok: gait_t=2.5 s, observation=250.
+[INFO] [1784788228.808666110] [baseline_trained_gait_snapshot_controller]: Wrote snapshot manifest: /home/rclab/r2_isaaclab_trone/artifacts/baseline_trained_gait_vx0p5/snapshots/snapshot_manifest.csv
+[INFO] [1784788228.808813248] [baseline_trained_gait_snapshot_controller]: Controller finished after 300 policy observations.

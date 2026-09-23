@@ -1,0 +1,37 @@
+{
+  "source_pdf": "/home/rclab/Downloads/fig3_combined (2).pdf",
+  "size_inches": [
+    3.5,
+    3.0
+  ],
+  "snapshot_times_s": [
+    0.5,
+    2.5,
+    6.5
+  ],
+  "snapshot_crop_xyxy": [
+    430,
+    300,
+    850,
+    700
+  ],
+  "snapshot_stages": [
+    "Initial",
+    "IMU fault",
+    "Post-fault"
+  ],
+  "line_width_pt": 1.0,
+  "font_size_pt": 7,
+  "datasets": {
+    "hybrid": {
+      "path": "/home/rclab/minipb_project/results/fig3_representative_seed42_20260824/hybrid/timeseries.npz",
+      "sha256": "00cd4ed961783f1852642abf7894bddaf348882f10eb288817966d8b5d1c0ce4",
+      "samples": 700
+    },
+    "mlp_only": {
+      "path": "/home/rclab/minipb_project/results/fig3_representative_seed42_20260824/mlp_only/timeseries.npz",
+      "sha256": "4f6a902306906ca49252efb7a988041dab63f1becccc2df77758e46d3b129dc5",
+      "samples": 700
+    }
+  }
+}

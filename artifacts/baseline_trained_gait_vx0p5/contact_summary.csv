@@ -1,0 +1,5 @@
+policy,frequency_hz,offset,duty,swing_height_m,foot,duration_s,sample_count,contact_ratio,touchdown_count
+baseline,2.0,0.5,0.5,0.05,FL,3.002,1502,0.5579227696404794,6
+baseline,2.0,0.5,0.5,0.05,FR,3.002,1502,0.5985352862849534,6
+baseline,2.0,0.5,0.5,0.05,RL,3.002,1502,0.49267643142476697,6
+baseline,2.0,0.5,0.5,0.05,RR,3.002,1502,0.640479360852197,7

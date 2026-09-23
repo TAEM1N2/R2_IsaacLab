@@ -895,9 +895,9 @@ class RewardsCfg:
         params={
             "target_height": 0.55,
         },
-        weight=-0.1,
+        weight=-0.25 #-0.1,
     )
-    pen_flat_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-0.1)
+    pen_flat_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-0.25) #-0.1)
 
     # ===== Fixed Auxiliary =====
     # ===== 

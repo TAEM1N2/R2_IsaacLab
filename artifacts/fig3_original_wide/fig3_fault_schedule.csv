@@ -1,0 +1,13 @@
+start_s_inclusive,end_s_exclusive,duration_s,fault_type
+2.00,2.09,0.09,zero_imu
+2.09,2.30,0.21,no_update
+2.30,2.56,0.26,zero_imu
+2.56,2.69,0.13,no_update
+2.69,2.79,0.10,zero_imu
+2.79,3.06,0.27,no_update
+3.06,3.32,0.26,zero_imu
+3.32,3.41,0.09,no_update
+3.41,3.52,0.11,zero_imu
+3.52,3.74,0.22,no_update
+3.74,3.96,0.22,zero_imu
+3.96,4.00,0.04,no_update

@@ -1,0 +1,21 @@
+[INFO] [1784787356.615884581] [tiptoe_gait_switch_controller]: Waiting for policy observations; initial mode=0, latency-compensated gait requests at 297/598/898 observations for applied 3/6/9 s boundaries, snapshots at local t=0.5/1.5/2.5 s.
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+[INFO] [1784787362.635012095] [tiptoe_gait_switch_controller]: Snapshot ok: mode=0, segment_t=0.5 s, observation=50.
+[INFO] [1784787363.644041644] [tiptoe_gait_switch_controller]: Snapshot ok: mode=0, segment_t=1.5 s, observation=150.
+[INFO] [1784787364.635880479] [tiptoe_gait_switch_controller]: Snapshot ok: mode=0, segment_t=2.5 s, observation=250.
+[INFO] [1784787365.081471465] [tiptoe_gait_switch_controller]: Switched to gait mode 1 at policy observation 297.
+[INFO] [1784787365.640373858] [tiptoe_gait_switch_controller]: Snapshot ok: mode=1, segment_t=0.5 s, observation=350.
+[INFO] [1784787366.636244047] [tiptoe_gait_switch_controller]: Snapshot ok: mode=1, segment_t=1.5 s, observation=450.
+[INFO] [1784787367.636612647] [tiptoe_gait_switch_controller]: Snapshot ok: mode=1, segment_t=2.5 s, observation=550.
+[INFO] [1784787368.082677480] [tiptoe_gait_switch_controller]: Switched to gait mode 2 at policy observation 598.
+[INFO] [1784787368.638791208] [tiptoe_gait_switch_controller]: Snapshot ok: mode=2, segment_t=0.5 s, observation=650.
+[INFO] [1784787369.641617231] [tiptoe_gait_switch_controller]: Snapshot ok: mode=2, segment_t=1.5 s, observation=750.
+[INFO] [1784787370.641635745] [tiptoe_gait_switch_controller]: Snapshot ok: mode=2, segment_t=2.5 s, observation=850.
+[INFO] [1784787371.082660593] [tiptoe_gait_switch_controller]: Switched to gait mode 3 at policy observation 898.
+[INFO] [1784787371.645022590] [tiptoe_gait_switch_controller]: Snapshot ok: mode=3, segment_t=0.5 s, observation=950.
+[INFO] [1784787372.643482532] [tiptoe_gait_switch_controller]: Snapshot ok: mode=3, segment_t=1.5 s, observation=1050.
+[INFO] [1784787373.641040935] [tiptoe_gait_switch_controller]: Snapshot ok: mode=3, segment_t=2.5 s, observation=1150.
+[INFO] [1784787374.101590913] [tiptoe_gait_switch_controller]: Wrote 12 snapshot records to /home/rclab/r2_isaaclab_trone/artifacts/tiptoe_gait_contact_map_vx0p5/snapshots/snapshot_manifest.csv.
+[INFO] [1784787374.101763035] [tiptoe_gait_switch_controller]: Controller finished after 1200 policy observations.

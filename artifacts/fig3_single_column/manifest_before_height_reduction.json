@@ -1,0 +1,33 @@
+{
+  "source_pdf": "/home/rclab/Downloads/fig3_combined (1).pdf",
+  "size_inches": [
+    3.5,
+    7.2
+  ],
+  "snapshot_times_s": [
+    0.5,
+    2.5,
+    4.5,
+    6.5
+  ],
+  "snapshot_crop_xyxy": [
+    420,
+    270,
+    870,
+    720
+  ],
+  "line_width_pt": 1.2,
+  "font_size_pt": 8,
+  "datasets": {
+    "hybrid": {
+      "path": "/home/rclab/minipb_project/results/fig3_representative_seed42_20260824/hybrid/timeseries.npz",
+      "sha256": "00cd4ed961783f1852642abf7894bddaf348882f10eb288817966d8b5d1c0ce4",
+      "samples": 700
+    },
+    "mlp_only": {
+      "path": "/home/rclab/minipb_project/results/fig3_representative_seed42_20260824/mlp_only/timeseries.npz",
+      "sha256": "4f6a902306906ca49252efb7a988041dab63f1becccc2df77758e46d3b129dc5",
+      "samples": 700
+    }
+  }
+}

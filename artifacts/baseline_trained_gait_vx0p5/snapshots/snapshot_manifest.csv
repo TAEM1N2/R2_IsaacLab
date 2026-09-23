@@ -1,0 +1,4 @@
+observation_count,gait_time_s,wall_time_s,status,xwd_path,stderr
+50,0.5,1784788226.3208272,ok,/home/rclab/r2_isaaclab_trone/artifacts/baseline_trained_gait_vx0p5/snapshots/t0p5s.xwd,
+150,1.5,1784788227.321274,ok,/home/rclab/r2_isaaclab_trone/artifacts/baseline_trained_gait_vx0p5/snapshots/t1p5s.xwd,
+250,2.5,1784788228.320489,ok,/home/rclab/r2_isaaclab_trone/artifacts/baseline_trained_gait_vx0p5/snapshots/t2p5s.xwd,

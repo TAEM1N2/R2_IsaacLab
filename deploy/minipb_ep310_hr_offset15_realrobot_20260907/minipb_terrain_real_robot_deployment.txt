@@ -1,0 +1,222 @@
+MiniPB Hybrid mixed-fault epoch 310 실물 배포 계약
+Hip-roll target offset 실험본: left +15 deg / right -15 deg
+패키지 작성: 2026-09-07 KST
+
+===============================================================================
+0. 용도와 중요 주의사항
+===============================================================================
+
+이 패키지는 MiniPB Hybrid mixed-fault epoch 310 actor와 고정 CPG-RBF를 사용하며,
+policy가 시작된 뒤 최종 hip-roll position target에 다음 offset을 추가하는 실험본이다.
+
+  FL_HR: +15 deg = +0.261799388 rad
+  FR_HR: -15 deg = -0.261799388 rad
+  RL_HR: +15 deg = +0.261799388 rad
+  RR_HR: -15 deg = -0.261799388 rad
+
+중요: offset은 ONNX actor 출력 내부에 포함되어 있지 않다. 실물 controller가 아래
+Hybrid 계산 순서대로 반드시 적용해야 한다. ONNX를 교체하는 것만으로 offset이
+생기지 않는다. 기립(Home PD) 구간에는 offset을 적용하지 않고, policy enable 이후
+target 계산에만 적용한다.
+
+이 offset은 학습에 포함되지 않은 외부 자세 변경이다. MuJoCo에서 15 deg 시험을
+통과했더라도 실물 안전을 보장하지 않는다. 지지대, 안전 tether, 독립 E-stop과 낮은
+command로 먼저 확인한다.
+
+===============================================================================
+1. 포함 파일과 무결성
+===============================================================================
+
+배포 ONNX:
+  minipb_terrain.onnx
+  원본 이름: minipb_mlp_actor_ep310.onnx
+  역할: deterministic residual MLP actor
+  크기: 775204 bytes
+  SHA-256: 7a01d5c97654bf96bec0e41184b8aaa08237584d295405cb2a3922b6ca4235c0
+
+CPG checkpoint:
+  cpg_model_199.pt
+  역할: fixed 20-basis CPG-RBF weight
+  크기: 1911 bytes
+  SHA-256: aa11810d46537ce71a71af6f894c0ad29ed0bc743dce36003e32c60c538b7b25
+
+원본 정책:
+  MiniPB Hybrid mixed-fault epoch 310, seed 52
+  training terrain: plane
+  training command: [vx, vy, yaw_rate] = [0.5, 0.0, 0.0]
+  mixed IMU faults: zero, stale/no-update, weak peak
+
+압축 해제 후 확인:
+  sha256sum minipb_terrain.onnx cpg_model_199.pt
+
+===============================================================================
+2. ONNX 입출력
+===============================================================================
+
+입력:
+  name: observation
+  dtype: float32
+  shape: [batch, 53]
+
+출력:
+  name: mlp_action
+  dtype: float32
+  shape: [batch, 12]
+
+actor:
+  53 -> Linear(512) -> ELU
+     -> Linear(256) -> ELU
+     -> Linear(128) -> ELU
+     -> Linear(12) -> Clip[-1, 1]
+
+recurrent state와 input normalization은 없다. ONNX 출력에 tanh를 다시 적용하지
+않는다. previous action에는 직전 clipped MLP action만 저장한다. CPG action,
+combined action, joint target을 previous action에 넣으면 안 된다.
+
+===============================================================================
+3. joint/action 순서
+===============================================================================
+
+  0..3   FL_HR, FR_HR, RL_HR, RR_HR
+  4..7   FL_HP, FR_HP, RL_HP, RR_HP
+  8..11  FL_KN, FR_KN, RL_KN, RR_KN
+
+joint position, joint velocity, ONNX output, CPG output, target limit와 offset 모두
+위 순서다. offset vector는 policy 좌표계에서 다음과 같다.
+
+  hip_roll_offset_rad =
+    [+0.261799388, -0.261799388, +0.261799388, -0.261799388,
+      0, 0, 0, 0, 0, 0, 0, 0]
+
+실물 encoder 좌표를 policy 좌표로 먼저 변환하고, 아래 target 계산이 끝난 뒤 다시
+hardware 좌표로 변환한다.
+
+  q_policy = sign * (q_hw - zero_offset)
+  dq_policy = sign * dq_hw
+  q_hw_target = zero_offset + sign * q_policy_target
+
+offset 부호는 raw motor 부호가 아니라 위 policy 좌표계 기준이다.
+
+===============================================================================
+4. 53차원 observation
+===============================================================================
+
+   0..2   body angular velocity [rad/s] * 0.25
+   3..5   projected gravity in body frame
+   6..8   command [vx, vy, yaw_rate]
+   9..20  absolute joint position [rad]
+  21..32  joint velocity [rad/s] * 0.1
+  33..44  previous clipped MLP action
+  45..48  sin phase [FL, FR, RL, RR]
+  49..52  cos phase [FL, FR, RL, RR]
+
+base linear velocity는 observation에 없다. 전체 observation을 추가 normalize하거나
+clip하지 않는다. joint position에는 offset을 더한 가상값이 아니라 encoder에서
+측정한 실제 absolute position을 넣는다. 정상 배포에서는 합성 noise/fault를 넣지
+않는다.
+
+===============================================================================
+5. phase와 CPG
+===============================================================================
+
+  physics rate: 500 Hz
+  policy rate: 100 Hz
+  policy dt: 0.01 s
+  gait period: 0.60 s = 60 policy ticks
+  leg phase offsets [FL,FR,RL,RR]: [0.0, 0.5, 0.5, 0.0]
+  CPG gain: 0.5
+  MLP gain: 1.0
+
+CPG는 cpg_model_199.pt의 20x3 RBF weight를 사용한다. native 35-sample RBF를
+normalized 0.60 s phase에 대해 선형 보간한다. 현재 base_phase로 observation의
+sin/cos를 만든 후 next_phase=(base_phase+1/60) mod 1로 CPG를 계산한다.
+
+command가 정확히 0이면 phase observation과 CPG 합을 0으로 mask한다. MLP residual은
+계속 활성 상태다. reset 시 base_phase=0, previous_mlp_action=0으로 시작한다.
+
+===============================================================================
+6. Hybrid, 15 deg offset, limit와 slew 계산 순서
+===============================================================================
+
+  q_default = [0,0,0,0, 0.8,0.8,0.8,0.8, -1.5,-1.5,-1.5,-1.5]
+  action_scale = [0.5 x4, 1.0 x4, 1.0 x4]
+  residual_scale = [0.15 x4, 0.25 x4, 0.20 x4]
+
+  mlp_action = clip(ONNX(observation), -1, 1)
+  cpg_action = 0.5 * CPG(next_phase) * moving
+
+  q_policy_raw = q_default
+                 + action_scale * (cpg_action + residual_scale * mlp_action)
+
+  q_policy_offset = q_policy_raw + hip_roll_offset_rad
+
+  q_limited = clip(q_policy_offset, target_lower, target_upper)
+
+  q_policy_target = clip(
+      q_limited,
+      previous_q_policy_target - max_target_velocity * 0.01,
+      previous_q_policy_target + max_target_velocity * 0.01)
+
+offset을 action에 더하거나 observation joint position에 더하면 안 된다. Hybrid target
+합산 후, position limit와 slew limiter 전에 더한다. reset 직후
+previous_q_policy_target=q_default로 초기화한다. 따라서 policy 시작 시 15 deg를 한
+tick에 step으로 가하지 않고 HR slew limit에 따라 점진적으로 도달한다.
+
+target limit [rad]:
+  HR: [-0.32, +0.32]
+  HP: [-1.57, +3.00]
+  KN: [-3.00, -0.523]
+
+max target velocity [rad/s]:
+  HR: 3.0
+  HP: 6.0
+  KN: 10.0
+
+15 deg offset 때문에 HR target이 limit에 닿을 가능성이 커진다. 실험 중 각 HR의
+clamp 비율, tracking error, motor current/torque와 온도를 기록한다.
+
+===============================================================================
+7. 저수준 제어 및 MuJoCo 확인 결과
+===============================================================================
+
+학습/시뮬레이션 nominal 값:
+  stiffness Kp: 20 Nm/rad
+  damping Kd: 1 Nm*s/rad
+  effort limit: 21 Nm
+  velocity limit: 19 rad/s
+  simulated actuator delay: 0..6 ms
+
+위 gain을 실물 motor drive에 단위 확인 없이 그대로 복사하지 않는다.
+
+MuJoCo 시험 조건:
+  Home PD 3 s 후 policy 시작
+  vx=0.5 m/s, 10 s
+  FL/RL HR +15 deg, FR/RR HR -15 deg
+
+MuJoCo 결과:
+  낙상 없이 10 s 종료
+  forward displacement: 약 +2.255 m
+  lateral displacement: 약 +0.053 m
+  minimum base height: 약 0.276 m
+  final base height: 약 0.288 m
+
+이 결과는 실물 안전 인증이 아니다.
+
+===============================================================================
+8. 실물 enable 전 체크리스트
+===============================================================================
+
+[ ] ONNX와 CPG SHA-256 확인
+[ ] ONNX input/output 이름, shape, float32 확인
+[ ] 12 joint 순서, encoder zero와 sign을 torque-off 상태에서 확인
+[ ] offset 부호 확인: FL/RL +15 deg, FR/RR -15 deg (policy 좌표계)
+[ ] Home 기립 구간에는 offset이 적용되지 않는지 확인
+[ ] CPG gain=0.5, residual scale=0.15/0.25/0.20 확인
+[ ] position limit 후 target slew 3/6/10 rad/s가 동작하는지 확인
+[ ] HR target clamp 비율과 tracking error logging 확인
+[ ] IMU timestamp/sequence/NaN/Inf/inference deadline watchdog 확인
+[ ] 통신 단절 또는 inference miss 시 safe stand/torque-off 확인
+[ ] 지지대에서 command=0 및 아주 낮은 속도부터 시험
+[ ] 안전 tether와 policy process에서 독립된 물리 E-stop 준비
+[ ] 사람과 장애물이 없는 제한 구역에서만 지상 시험
+

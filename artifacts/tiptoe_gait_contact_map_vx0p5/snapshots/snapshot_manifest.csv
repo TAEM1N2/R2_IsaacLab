@@ -1,0 +1,13 @@
+observation_count,gait_mode,segment_time_s,wall_time_s,status,xwd_path,stderr
+50,0,0.5,1784787362.6348112,ok,/home/rclab/r2_isaaclab_trone/artifacts/tiptoe_gait_contact_map_vx0p5/snapshots/mode0_t0p5s.xwd,
+150,0,1.5,1784787363.6438367,ok,/home/rclab/r2_isaaclab_trone/artifacts/tiptoe_gait_contact_map_vx0p5/snapshots/mode0_t1p5s.xwd,
+250,0,2.5,1784787364.63568,ok,/home/rclab/r2_isaaclab_trone/artifacts/tiptoe_gait_contact_map_vx0p5/snapshots/mode0_t2p5s.xwd,
+350,1,0.5,1784787365.6401675,ok,/home/rclab/r2_isaaclab_trone/artifacts/tiptoe_gait_contact_map_vx0p5/snapshots/mode1_t0p5s.xwd,
+450,1,1.5,1784787366.6359792,ok,/home/rclab/r2_isaaclab_trone/artifacts/tiptoe_gait_contact_map_vx0p5/snapshots/mode1_t1p5s.xwd,
+550,1,2.5,1784787367.6363544,ok,/home/rclab/r2_isaaclab_trone/artifacts/tiptoe_gait_contact_map_vx0p5/snapshots/mode1_t2p5s.xwd,
+650,2,0.5,1784787368.6385875,ok,/home/rclab/r2_isaaclab_trone/artifacts/tiptoe_gait_contact_map_vx0p5/snapshots/mode2_t0p5s.xwd,
+750,2,1.5,1784787369.64141,ok,/home/rclab/r2_isaaclab_trone/artifacts/tiptoe_gait_contact_map_vx0p5/snapshots/mode2_t1p5s.xwd,
+850,2,2.5,1784787370.6414258,ok,/home/rclab/r2_isaaclab_trone/artifacts/tiptoe_gait_contact_map_vx0p5/snapshots/mode2_t2p5s.xwd,
+950,3,0.5,1784787371.6446958,ok,/home/rclab/r2_isaaclab_trone/artifacts/tiptoe_gait_contact_map_vx0p5/snapshots/mode3_t0p5s.xwd,
+1050,3,1.5,1784787372.643275,ok,/home/rclab/r2_isaaclab_trone/artifacts/tiptoe_gait_contact_map_vx0p5/snapshots/mode3_t1p5s.xwd,
+1150,3,2.5,1784787373.6408427,ok,/home/rclab/r2_isaaclab_trone/artifacts/tiptoe_gait_contact_map_vx0p5/snapshots/mode3_t2p5s.xwd,
